@@ -1,0 +1,6 @@
+abcjs*
+dist/
+node_modules/
+coverage/
+demo.html
+.DS_Store

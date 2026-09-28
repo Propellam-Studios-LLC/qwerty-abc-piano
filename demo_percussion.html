@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>qwerty-abc-piano — percussion mode demo</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/abcjs@6.6.3/abcjs-audio.css" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      padding: 24px;
+      min-height: 100vh;
+      max-width: 860px;
+      margin: 0 auto;
+    }
+
+    h1 { font-size: 1.5rem; margin-bottom: 4px; color: #a0c4ff; }
+    .subtitle { font-size: 0.85rem; color: #666; margin-bottom: 22px; }
+
+    #full-ui {
+      background: #22223a;
+      border-radius: 10px;
+      padding: 18px;
+    }
+
+    .output-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    #abc-text {
+      flex: 1;
+      font-family: monospace;
+      font-size: 0.9rem;
+      background: #0d0f18;
+      color: #7ec8e3;
+      padding: 10px 14px;
+      border-radius: 6px;
+      min-height: 38px;
+      word-break: break-all;
+      white-space: pre-wrap;
+    }
+
+    #btn-copy {
+      padding: 7px 16px;
+      border-radius: 6px;
+      border: 1px solid #444;
+      background: #22223a;
+      color: #ccc;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.12s, border-color 0.12s, color 0.12s;
+      white-space: nowrap;
+    }
+    #btn-copy:hover  { background: #2e2e50; border-color: #666; color: #fff; }
+    #btn-copy.copied { background: #1a3a1a; border-color: #3a7a3a; color: #7ec87e; }
+
+    .info-box {
+      margin-top: 22px;
+      background: #141e14;
+      border: 1px solid #2a4a2a;
+      border-radius: 6px;
+      padding: 14px 18px;
+      font-size: 0.82rem;
+      color: #999;
+      line-height: 1.7;
+    }
+    .info-box p + p { margin-top: 10px; }
+    .info-box code {
+      background: #0d0f18;
+      padding: 1px 6px;
+      border-radius: 3px;
+      color: #7ec8e3;
+      font-family: monospace;
+    }
+    .info-box strong { color: #ccc; }
+
+    /* Debug panel */
+    #abc-debug {
+      margin-top: 18px;
+      background: #0d0f18;
+      border: 1px solid #333;
+      border-radius: 6px;
+      padding: 12px 14px;
+      font-family: monospace;
+      font-size: 0.8rem;
+      color: #aaa;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    #abc-debug strong { color: #7ec8e3; }
+  </style>
+</head>
+<body>
+
+<h1>qwerty-abc-piano — percussion mode</h1>
+<p class="subtitle">
+  Rhythm-only input on a one-line percussion staff, mounted with
+  <code>percussionMode: true, shellToggle: false</code> so the page starts in
+  percussion mode and has no Piano/Percussion toggle.
+</p>
+
+<div id="full-ui"></div>
+
+<div class="output-bar">
+  <div id="abc-text">(empty — tap or press any key)</div>
+  <button id="btn-copy">Copy ABC</button>
+</div>
+
+<!-- Raw ABC sent to abcjs on each render, including the %%stafflines 1 directive in the header -->
+<div id="abc-debug"><strong>Last ABC passed to abcjs:</strong>
+(waiting for first render…)</div>
+
+<div class="info-box">
+  <p>
+    <strong>What this shows:</strong> <code>percussionMode: true</code> records every note at one
+    fixed pitch, so only rhythm matters. With <code>shellToggle: false</code> the Piano/Percussion
+    toggle bar is hidden and the UI stays locked to percussion. The notation is drawn on a one-line
+    staff via the <code>%%stafflines 1</code> directive.
+  </p>
+  <p>
+    <strong>The "Last ABC passed to abcjs" panel</strong> above shows the full ABC string (header
+    included) rendered on each keystroke, so you can see exactly what the library produces.
+  </p>
+  <p>
+    <strong>Playing:</strong> Click <strong>TAP</strong> or press any letter/number key to enter a
+    note. Every note is recorded as B4, written <code>B</code> (the middle line of the percussion
+    staff). Duration keys 1–6 still work. Press <strong>Z</strong> to insert a rest.
+  </p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/abcjs@6.6.3/dist/abcjs-basic.js"></script>
+
+<script type="module">
+  import { mountFullUI } from './dist/index.esm.js';
+
+  let audioCtx = null;
+  try { audioCtx = new AudioContext(); } catch { /* audio unavailable */ }
+
+  document.addEventListener('keydown',    () => audioCtx?.state === 'suspended' && audioCtx.resume(), { capture: true, passive: true });
+  document.addEventListener('pointerdown',() => audioCtx?.state === 'suspended' && audioCtx.resume(), { capture: true, passive: true });
+
+  const debugEl = document.getElementById('abc-debug');
+
+  const inst = mountFullUI('#full-ui', {
+    abcjs:              ABCJS,
+    abcjsAudioContext:  audioCtx,
+    abcjsRenderOptions: { responsive: 'resize', add_classes: true },
+    percussionMode:     true,
+    shellToggle:        false,
+    onChange: (abc) => {
+      document.getElementById('abc-text').textContent = abc || '(empty — tap or press any key)';
+      // Show the full ABC (including the header with %%stafflines 1), escaped for innerHTML
+      debugEl.innerHTML = '<strong>Last ABC passed to abcjs:</strong>\n' +
+        inst.getFullABC().replace(/&/g,'&amp;').replace(/</g,'&lt;');
+    },
+  });
+
+  // Show the initial (empty-staff placeholder) ABC right away
+  debugEl.innerHTML = '<strong>Last ABC passed to abcjs (initial placeholder):</strong>\n' +
+    inst.getFullABC().replace(/&/g,'&amp;').replace(/</g,'&lt;');
+
+  const copyBtn = document.getElementById('btn-copy');
+  copyBtn.addEventListener('click', async () => {
+    const abc = inst.getFullABC();
+    if (!abc.trim()) return;
+    await navigator.clipboard.writeText(abc);
+    copyBtn.textContent = 'Copied!';
+    copyBtn.classList.add('copied');
+    setTimeout(() => { copyBtn.textContent = 'Copy ABC'; copyBtn.classList.remove('copied'); }, 1500);
+  });
+</script>
+
+</body>
+</html>

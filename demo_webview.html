@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>qwerty-abc-piano — WebView (mobile host) demo</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/abcjs@6.6.3/abcjs-audio.css" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 18px; max-width: 760px; margin: 0 auto; }
+    h1 { font-size: 1.3rem; color: #a0c4ff; }
+    .subtitle { font-size: 0.82rem; color: #888; margin-bottom: 18px; }
+    #full-ui { background: #22223a; border-radius: 10px; padding: 14px; }
+
+    .host-panel { margin-top: 18px; border: 1px solid #2a4a6a; border-radius: 8px; padding: 14px; background: #141e2e; }
+    .host-panel h2 { font-size: 0.9rem; color: #7ec8e3; margin-bottom: 4px; }
+    .host-panel .note { font-size: 0.75rem; color: #889; margin-bottom: 10px; }
+    .host-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+    .host-btns button { padding: 8px 14px; border-radius: 6px; border: 1px solid #3a5a7a; background: #1e2e44; color: #cde; font-weight: 600; cursor: pointer; min-height: 44px; }
+    .host-btns button:hover { background: #2a3e5a; }
+
+    #abc-out, #channel-log { font-family: monospace; font-size: 0.82rem; background: #0d0f18; color: #7ec8e3; padding: 10px 12px; border-radius: 6px; margin-top: 10px; white-space: pre-wrap; word-break: break-all; min-height: 36px; }
+    #channel-log { color: #9c9; max-height: 160px; overflow-y: auto; }
+    code { background: #0d0f18; padding: 1px 5px; border-radius: 3px; color: #7ec8e3; }
+  </style>
+</head>
+<body>
+
+<h1>qwerty-abc-piano — embedding in a native WebView</h1>
+<p class="subtitle">
+  How a mobile app can host the piano in a WebView: a native iOS/Android app loads a page like this one,
+  drives the widget through a global handle, and receives its events over a JavaScript channel (it can
+  also forward MIDI into the page). Here the widget is mounted, exposed on <code>window.__qap</code>, and
+  its notifications are forwarded through a simulated JS channel. Tap the on-screen piano (no keyboard
+  needed) to play.
+</p>
+
+<!-- The widget. mountFullUI renders the touch piano + its own Start/End chord button. -->
+<div id="full-ui"></div>
+
+<!-- Simulates the native side of the bridge. In a real app these are native buttons
+     whose handlers evaluate JavaScript in the WebView, e.g. runJavaScript('window.__qap.openChord()'). -->
+<div class="host-panel">
+  <h2>Host (native app) → JS  —  <code>runJavaScript(...)</code></h2>
+  <p class="note">Native buttons drive chord entry without a physical keyboard, doing the same job as the widget's own Start/End chord button.</p>
+  <div class="host-btns">
+    <button id="h-open">window.__qap.openChord()</button>
+    <button id="h-commit">window.__qap.commitChord()</button>
+    <button id="h-clear">window.__qap.clear()</button>
+    <button id="h-read">getFullABC() →</button>
+  </div>
+  <div id="abc-out">(getFullABC output appears here)</div>
+
+  <h2 style="margin-top:14px;">JS → Host  —  <code>QapChannel.postMessage(...)</code></h2>
+  <p class="note">The widget's <code>qwerty-abc-piano:*</code> document events are forwarded to the JS channel.</p>
+  <div id="channel-log"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/abcjs@6.6.3/dist/abcjs-basic.js"></script>
+<script type="module">
+  import { mountFullUI } from './dist/index.esm.js';
+
+  let audioCtx = null;
+  try { audioCtx = new AudioContext(); } catch { /* audio unavailable */ }
+  document.addEventListener('pointerdown', () => audioCtx?.state === 'suspended' && audioCtx.resume(), { capture: true, passive: true });
+
+  // ── Mount the pitched piano and expose it on a global handle ──────────────
+  // The native host reaches the instance ONLY through this handle, since a
+  // WebView cannot hold a JS object reference across the bridge.
+  const inst = mountFullUI('#full-ui', {
+    abcjs:             ABCJS,
+    abcjsAudioContext: audioCtx,
+    keySignature:      'C',
+  });
+  window.__qap = inst;
+
+  // ── JS → Host: a stand-in for a native JavaScript channel named 'QapChannel' ──
+  // On a real device, the host app registers the channel and injects
+  // window.QapChannel.postMessage; this fallback just logs to the page.
+  const log = document.getElementById('channel-log');
+  const QapChannel = window.QapChannel ?? {
+    postMessage: (msg) => { log.textContent = msg + '\n' + log.textContent; },
+  };
+
+  // Forward the package's existing document CustomEvents to the channel.
+  // These fire regardless of how a note/chord was entered (key, touch, or button).
+  document.addEventListener('qwerty-abc-piano:change', (e) =>
+    QapChannel.postMessage('change: ' + (e.detail.abc || '(empty)')));
+  document.addEventListener('qwerty-abc-piano:simultaneous-change', (e) =>
+    QapChannel.postMessage(`simultaneous: active=${e.detail.active} notes=${e.detail.noteCount}`));
+  document.addEventListener('qwerty-abc-piano:clear-requested', () =>
+    QapChannel.postMessage('clear-requested'));
+
+  // ── Host → JS: native buttons calling the global handle ───────────────────
+  document.getElementById('h-open').addEventListener('click',   () => window.__qap.openChord());
+  document.getElementById('h-commit').addEventListener('click', () => window.__qap.commitChord());
+  document.getElementById('h-clear').addEventListener('click',  () => window.__qap.clear());
+  document.getElementById('h-read').addEventListener('click',   () => {
+    // Mirrors a host evaluating 'window.__qap.getFullABC()' and reading back the result.
+    document.getElementById('abc-out').textContent = window.__qap.getFullABC();
+  });
+</script>
+
+</body>
+</html>

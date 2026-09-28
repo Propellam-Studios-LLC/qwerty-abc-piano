@@ -1,0 +1,67 @@
+{
+  "name": "qwerty-abc-piano",
+  "version": "0.3.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Propellam-Studios-LLC/qwerty-abc-piano.git"
+  },
+  "homepage": "https://github.com/Propellam-Studios-LLC/qwerty-abc-piano#readme",
+  "bugs": "https://github.com/Propellam-Studios-LLC/qwerty-abc-piano/issues",
+  "description": "Turn a QWERTY keyboard into a piano-style music input device that outputs ABC notation in real time",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.esm.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.esm.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "rollup -c && tsc --emitDeclarationOnly",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "prepublishOnly": "npm test && npm run build"
+  },
+  "keywords": [
+    "abc",
+    "notation",
+    "piano",
+    "music",
+    "keyboard",
+    "qwerty",
+    "music-education"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "abcjs": ">=6.0.0"
+  },
+  "peerDependenciesMeta": {
+    "abcjs": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@rollup/plugin-typescript": "^12.3.0",
+    "@vitest/coverage-v8": "^3.2.4",
+    "abcjs": "^6.6.3",
+    "happy-dom": "^20.9.0",
+    "puppeteer-core": "^25.3.0",
+    "rollup": "^4.60.3",
+    "tslib": "^2.8.1",
+    "typescript": "^6.0.3",
+    "vitest": "^3.2.4"
+  }
+}
