@@ -336,41 +336,54 @@ export class QWERTYToABCPiano {
 
   // ── Private: ABC note conversion ─────────────────────────────────────────
 
-  private _noteToABC(note: string, octave: number, duration: Duration, isDotted: boolean): string {
+  /**
+   * ABC for one note.
+   *
+   * `bar` is the accidental state of the current bar: for each letter and
+   * octave written with an explicit accidental earlier in the bar, the
+   * alteration it set (+1 sharp, -1 flat, 0 natural). ABC accidentals last
+   * to the end of the bar for notes of the same letter and octave, so a note
+   * needs its own accidental whenever its pitch differs from what the key
+   * signature and that state imply (after `^d`, a D natural in the same bar
+   * must be written `=d`). Pass the same map for every note of a bar, and a
+   * new one after each barline; without it, the note is spelled against the
+   * key signature alone.
+   */
+  private _noteToABC(note: string, octave: number, duration: Duration, isDotted: boolean,
+                     bar?: Map<string, number>): string {
     const baseLetter        = note[0];
     const hasInherentSharp  = note.length === 2 && note[1] === '#';
     const keySharps         = getKeyImpliedSharps(this._keySignature);
     const keyFlats          = getKeyImpliedFlats(this._keySignature);
 
-    let prefix: string;
+    // The letter to write and the alteration the pitch needs on it.
     let outputLetter: string;
-
+    let alter: number;
     if (hasInherentSharp) {
-      // Black key: prefer flat spelling when the key signature implies it.
+      // Black key: a flat spelling when the key signature implies it
+      // (A# in Bb major is written as B, i.e. Bb), otherwise a sharp.
       const enharmonicLetter = SHARP_TO_FLAT_LETTER[note];
       if (enharmonicLetter && keyFlats.has(enharmonicLetter)) {
-        // e.g. A# in Bb major → write 'B' (key sig implies Bb)
         outputLetter = enharmonicLetter;
-        prefix = '';
-      } else if (keySharps.has(baseLetter)) {
-        // e.g. F# in G major → write 'F' (key sig implies F#)
-        outputLetter = baseLetter;
-        prefix = '';
+        alter = -1;
       } else {
-        // e.g. C# in G major → write '^c' (chromatic, not in key sig)
         outputLetter = baseLetter;
-        prefix = '^';
+        alter = 1;
       }
     } else {
-      // White key (natural pitch): check whether the key sig would alter this letter.
-      if (keySharps.has(baseLetter) || keyFlats.has(baseLetter)) {
-        // e.g. F natural in G major → '=F'; B natural in Bb major → '=B'
-        outputLetter = baseLetter;
-        prefix = '=';
-      } else {
-        outputLetter = baseLetter;
-        prefix = '';
-      }
+      outputLetter = baseLetter;
+      alter = 0;
+    }
+
+    // What the letter sounds like without an accidental here: the bar's
+    // earlier accidental on this letter and octave, else the key signature.
+    const keyAlter = keySharps.has(outputLetter) ? 1 : keyFlats.has(outputLetter) ? -1 : 0;
+    const slot = `${outputLetter}${octave}`;
+    const implied = bar?.has(slot) ? bar.get(slot)! : keyAlter;
+    let prefix = '';
+    if (alter !== implied) {
+      prefix = alter === 1 ? '^' : alter === -1 ? '_' : '=';
+      bar?.set(slot, alter);
     }
 
     // ABC octave encoding, standard ABC 2.1 (and abcjs): `C` is middle C (C4,
@@ -1129,7 +1142,15 @@ export class QWERTYToABCPiano {
 
   // ── Private: ABC parser (for setABC) ────────────────────────────────────
 
-  private _parseABCToken(token: string): Extract<NoteEntry, { type: 'note' }> | null {
+  /**
+   * Parse one ABC note token into an absolute pitch.
+   *
+   * `bar` is the accidental state of the current bar, as in {@link _noteToABC}:
+   * a note written without an accidental takes the alteration of an earlier
+   * accidental on the same letter and octave in the bar, else the key
+   * signature's; a note with an accidental records it for the rest of the bar.
+   */
+  private _parseABCToken(token: string, bar?: Map<string, number>): Extract<NoteEntry, { type: 'note' }> | null {
     // Matches the ABC subset this library produces:
     // optional-accidental  letter  octave-modifiers  optional-duration
     const match = token.match(/^([_^=]?)([A-Ga-g])([',]*)(\d+\/\d+|\d+|\/\d+)?$/);
@@ -1147,23 +1168,27 @@ export class QWERTYToABCPiano {
     const keySharps   = getKeyImpliedSharps(this._keySignature);
     const keyFlats    = getKeyImpliedFlats(this._keySignature);
 
-    // Convert the ABC token's accidental + letter into an absolute-pitch note name.
-    let note: string;
-    if (accStr === '^') {
-      note = upperLetter + '#';                                // ^F → F#
-    } else if (accStr === '_') {
-      note = FLAT_TO_SHARP_NOTE[upperLetter] ?? upperLetter;  // _B → A#
-    } else if (accStr === '=') {
-      note = upperLetter;                                      // =F → F natural
+    // The alteration this note sounds with: its own accidental, else an
+    // earlier accidental on this letter and octave in the bar, else the key.
+    const slot = `${upperLetter}${octave}`;
+    let alter: number;
+    if (accStr) {
+      alter = accStr === '^' ? 1 : accStr === '_' ? -1 : 0;
+      bar?.set(slot, alter);
+    } else if (bar?.has(slot)) {
+      alter = bar.get(slot)!;
     } else {
-      // No explicit accidental: infer the absolute pitch from the key signature.
-      if (keySharps.has(upperLetter)) {
-        note = upperLetter + '#';                              // F in K:G → F#
-      } else if (keyFlats.has(upperLetter)) {
-        note = FLAT_TO_SHARP_NOTE[upperLetter] ?? upperLetter; // B in K:Bb → A#
-      } else {
-        note = upperLetter;                                    // C in K:C → C
-      }
+      alter = keySharps.has(upperLetter) ? 1 : keyFlats.has(upperLetter) ? -1 : 0;
+    }
+
+    // As an absolute-pitch note name (sharps for black keys).
+    let note: string;
+    if (alter === 1) {
+      note = upperLetter + '#';                                // ^F, or F in K:G → F#
+    } else if (alter === -1) {
+      note = FLAT_TO_SHARP_NOTE[upperLetter] ?? upperLetter;  // _B, or B in K:Bb → A#
+    } else {
+      note = upperLetter;                                      // =F, or C in K:C → natural
     }
 
     const durLookup: Record<string, [Duration, boolean]> = {
@@ -1232,8 +1257,10 @@ export class QWERTYToABCPiano {
   private _bodyFor(notes: NoteEntry[]): string {
     const parts: string[] = [];
     let barlineCount = 0;
+    let bar = new Map<string, number>();
     for (const entry of notes) {
       if (entry.type === 'barline') {
+        bar = new Map();
         barlineCount++;
         if (this._measuresPerLine > 0 && barlineCount % this._measuresPerLine === 0) {
           parts.push('|\n');
@@ -1245,6 +1272,7 @@ export class QWERTYToABCPiano {
         // the line at the measures-per-line boundary and is space-separated.
         // Decorations / chord symbols / grace notes glue to the following note.
         if (entry.text.includes('|')) {
+          bar = new Map();
           barlineCount++;
           if (this._measuresPerLine > 0 && barlineCount % this._measuresPerLine === 0) {
             parts.push(entry.text + '\n');
@@ -1264,10 +1292,10 @@ export class QWERTYToABCPiano {
           : DURATION_MAP[entry.duration];
         parts.push(`z${suffix}`);
       } else if (entry.type === 'simultaneous') {
-        const notes = entry.notes.map(n => this._noteToABC(n.note, n.octave, entry.duration, entry.isDotted)).join('');
+        const notes = entry.notes.map(n => this._noteToABC(n.note, n.octave, entry.duration, entry.isDotted, bar)).join('');
         parts.push(`[${notes}]`);
       } else {
-        parts.push(this._noteToABC(entry.note, entry.octave, entry.duration, entry.isDotted));
+        parts.push(this._noteToABC(entry.note, entry.octave, entry.duration, entry.isDotted, bar));
       }
     }
     return parts.join('').trimEnd();
@@ -1427,6 +1455,7 @@ export class QWERTYToABCPiano {
     // `matchAll` would skip those characters and the ABC would not round-trip.
     const re = /("[^"]*"|![^!]*!|\{[^}]*\}|\[\||:\|\d*|\|:|\|\||\|\]|\|\d+|::|\||\[[^\]]*\]|\(\d+|[_^=]?[A-Ga-g][',]*(?:\d+\/\d+|\d+|\/\d+)?|z(?:\d+\/\d+|\d+|\/\d+)?|\s+|[^\s])/g;
     let lastWasBarline = false;
+    let bar = new Map<string, number>(); // accidentals in force in the current bar
     for (const match of abc.matchAll(re)) {
       const token = match[0];
       if (/^\s+$/.test(token)) {
@@ -1437,12 +1466,14 @@ export class QWERTYToABCPiano {
       }
       // Plain single barline keeps its dedicated entry (drives measures-per-line wrapping).
       if (token === '|') {
+        bar = new Map();
         this._notes.push({ type: 'barline' });
         lastWasBarline = true;
         continue;
       }
       // Repeats / voltas / double & end barlines pass through verbatim as raw.
       if (/^(?:\|:|:\|\d*|\|\||\|\]|\[\||\|\d+|::)$/.test(token)) {
+        bar = new Map();
         this._notes.push({ type: 'raw', text: token });
         lastWasBarline = true;
         continue;
@@ -1471,7 +1502,7 @@ export class QWERTYToABCPiano {
         let firstDotted = false;
         let isFirst = true;
         for (const nm of inner.matchAll(noteRe)) {
-          const parsed = this._parseABCToken(nm[1]);
+          const parsed = this._parseABCToken(nm[1], bar);
           if (parsed) {
             notes.push({ note: parsed.note, octave: parsed.octave });
             if (isFirst) { firstDuration = parsed.duration; firstDotted = parsed.isDotted; isFirst = false; }
@@ -1495,7 +1526,7 @@ export class QWERTYToABCPiano {
         const rest = this._parseRestToken(token);
         this._notes.push(rest ?? { type: 'raw', text: token });
       } else {
-        const entry = this._parseABCToken(token);
+        const entry = this._parseABCToken(token, bar);
         this._notes.push(entry ?? { type: 'raw', text: token });
       }
     }

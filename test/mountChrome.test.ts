@@ -155,3 +155,37 @@ describe('undo + clear render in every configuration', () => {
       .toContain('.qap-clear-btn { margin-left');
   });
 });
+
+// The help panel's shortcut table names the home row's PITCHES, which move with
+// `octaveShift`. A hardcoded "E3 to A4" would misdescribe the keyboard on every
+// mount that shifts it (for example a host that mounts at +1 for material around
+// C5), and a wrong description is worse than none.
+describe('the shortcut table describes the keyboard it is attached to', () => {
+  function homeRowText(div: HTMLElement): string {
+    const dts = div.querySelectorAll('.qap-help-shortcuts dt');
+    for (let i = 0; i < dts.length; i++) {
+      if ((dts[i].textContent ?? '').includes('H')) {
+        return dts[i].nextElementSibling?.textContent ?? '';
+      }
+    }
+    return '';
+  }
+
+  it('names E3–A4 with H as middle C at the default shift', () => {
+    const div = container();
+    mountFullUI(div, {});
+    expect(homeRowText(div)).toBe('White keys, E3 to A4 (H is middle C)');
+  });
+
+  it('follows octaveShift up', () => {
+    const div = container();
+    mountFullUI(div, { octaveShift: 1 });
+    expect(homeRowText(div)).toBe('White keys, E4 to A5 (H is C5)');
+  });
+
+  it('follows octaveShift down', () => {
+    const div = container();
+    mountFullUI(div, { octaveShift: -1 });
+    expect(homeRowText(div)).toBe('White keys, E2 to A3 (H is C3)');
+  });
+});

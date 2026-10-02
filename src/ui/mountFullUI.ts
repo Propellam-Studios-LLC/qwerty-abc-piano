@@ -158,8 +158,16 @@ function midiHowTo(): HTMLElement {
  * actually does something (`escapeClears` or `onClearRequested`).
  */
 function shortcutsSection(opts: MountFullUIOptions): HTMLElement {
+  // The home row's pitches depend on the starting octave shift, so the row that
+  // names them is computed rather than written out: a host that mounts with
+  // `octaveShift: 1` (material around C5) would otherwise be shown a range its
+  // keys do not play, which is worse than showing no range at all.
+  const shift = Math.max(-2, Math.min(2, Math.round(opts.octaveShift ?? 0)));
+  const homeRow = shift === 0
+    ? 'White keys, E3 to A4 (H is middle C)'
+    : `White keys, E${3 + shift} to A${4 + shift} (H is C${4 + shift})`;
   const rows: Array<[string, string]> = [
-    ["A S D F G H J K L ; '", 'White keys, E3 to A4 (H is middle C)'],
+    ["A S D F G H J K L ; '", homeRow],
     ['E R T U I P [',         'Black keys'],
     ['1 – 6',                 'Whole, half, quarter, eighth, 16th, 32nd'],
     ['.',                     'Dotted on / off'],
