@@ -4,7 +4,7 @@ import { midiToNoteString } from './piano.js';
 import { renderChordButton } from './chordButton.js';
 import { TAP_HINT } from './tapButton.js';
 import { injectStylesInto } from '../domStyles.js';
-import { enharmonicDisplayName } from '../keymap.js';
+import { enharmonicDisplayName, pitchToMidi } from '../keymap.js';
 
 const KEY_SIGS = ['C','G','D','A','E','B','F','Bb','Eb','Ab','Db','Gb'];
 
@@ -34,7 +34,9 @@ const COMPACT_HIGH_IDX = whiteMidiIndex(71); // B4
 // 44px touch target: 14 white keys → viewBox 880, key width 58, so 44 px is
 // reached at 44 * 880 / 58 ≈ 668 px.
 const COMPACT_MAX_WIDTH = 680;
-const MIN_SPAN = 7; // minimum white keys between low and high (≈ 1 octave)
+// Smallest allowed highIdx − lowIdx: one C-to-B octave (C4–B4 is 6 white-key
+// steps), which is also the phone's default window.
+const MIN_SPAN = 6;
 const OCTAVE_STEPS = 7; // white keys per octave — WHITE_MIDIS holds white keys only
 
 /**
@@ -162,13 +164,19 @@ function shortcutsSection(opts: MountFullUIOptions): HTMLElement {
   // names them is computed rather than written out: a host that mounts with
   // `octaveShift: 1` (material around C5) would otherwise be shown a range its
   // keys do not play, which is worse than showing no range at all.
+  // The anchor decides which key is C.
   const shift = Math.max(-2, Math.min(2, Math.round(opts.octaveShift ?? 0)));
-  const homeRow = shift === 0
-    ? 'White keys, E3 to A4 (H is middle C)'
-    : `White keys, E${3 + shift} to A${4 + shift} (H is C${4 + shift})`;
+  const c4Anchor = opts.qwertyAnchor === 'C4';
+  const homeRow = c4Anchor
+    ? (shift === 0
+      ? 'White keys, C4 to F5 (A is middle C)'
+      : `White keys, C${4 + shift} to F${5 + shift} (A is C${4 + shift})`)
+    : (shift === 0
+      ? 'White keys, E3 to A4 (H is middle C)'
+      : `White keys, E${3 + shift} to A${4 + shift} (H is C${4 + shift})`);
   const rows: Array<[string, string]> = [
     ["A S D F G H J K L ; '", homeRow],
-    ['E R T U I P [',         'Black keys'],
+    [c4Anchor ? 'W E T Y U O P' : 'E R T U I P [', 'Black keys'],
     ['1 – 6',                 'Whole, half, quarter, eighth, 16th, 32nd'],
     ['.',                     'Dotted on / off'],
     ['Z',                     'Rest'],
@@ -351,6 +359,22 @@ export interface MountFullUIOptions extends Omit<QWERTYToABCOptions, 'pianoTarge
   showHelp?: boolean;
   /** Where the help panel's "Full reference" link points. Default `"https://propellamstudios.com"`. */
   helpUrl?: string;
+  /**
+   * Which on-screen keyboard to draw. `'auto'` (default): the range keyboard
+   * on touch devices and the QWERTY layout elsewhere. `'range'`: the range
+   * keyboard everywhere, e.g. a display piano on a desktop page showing
+   * exactly `touchRange: { low, high }` with scientific labels. Ignored when
+   * `touchRange` is `false`.
+   */
+  keyboard?: 'auto' | 'range';
+  /**
+   * Show the undo/clear edit row. Honoured ONLY for a play-only mount
+   * (`lockMode: true` with `defaultMode: 'play'`), where nothing can be
+   * entered and so nothing needs deleting; there `false` hides the edit row
+   * and the mode button. In every other configuration the edit row is always
+   * shown. Default `true`.
+   */
+  showEditRow?: boolean;
 }
 
 /**
@@ -367,9 +391,15 @@ export interface MountFullUIOptions extends Omit<QWERTYToABCOptions, 'pianoTarge
  * `showNotation`, all default `true` — so a focused mount can offer only the
  * controls the user actually needs.
  *
- * The undo/clear edit row is the one thing that is NOT suppressible: on a
- * touch screen there is no Backspace, so these buttons are the only way to
- * delete what was entered.
+ * The undo/clear edit row is NOT suppressible wherever notes can be entered:
+ * on a touch screen there is no Backspace, so these buttons are the only way
+ * to delete what was entered. Only a play-only mount (`lockMode: true`,
+ * `defaultMode: 'play'`) may hide it, with `showEditRow: false`.
+ *
+ * For lessons: `qwertyAnchor`, `noteLabels`, `allowedPitches`,
+ * `keyboard: 'range'`, `keyboardScope: 'focus'` (several pianos on one page)
+ * and `onNotePlayed` configure the mount, and the returned instance's
+ * `highlightPitches()` / `markKeys()` colour its keys.
  *
  * Pass `shellToggle: false` to hide the Piano/Percussion toggle bar and lock
  * the UI to whichever mode `percussionMode` specifies (default: piano).
@@ -435,6 +465,13 @@ export function mountFullUI(
   const showTuplet      = options.showTuplet    !== false;
   const showTransport   = options.showTransport !== false;
   const showAdvanced    = options.showAdvanced  !== false;
+  // A play-only mount records nothing, so it may drop the edit row (and the
+  // mode button, which could not change anything).
+  const displayOnly     = options.lockMode === true && options.defaultMode === 'play' &&
+                          options.showEditRow === false;
+  if (options.keyboard !== undefined && options.keyboard !== 'auto' && options.keyboard !== 'range') {
+    throw new Error(`qwerty-abc-piano: keyboard must be 'auto' or 'range', got "${String(options.keyboard)}"`);
+  }
   if (compactChrome) root.classList.add('qap-compact');
 
   // ── Shell toggle bar (omitted when shellToggle:false) ─────────────────
@@ -529,7 +566,7 @@ export function mountFullUI(
     midiSection.scrollIntoView?.({ block: 'nearest' });
   }
 
-  topBar.appendChild(modeDiv);
+  if (!displayOnly) topBar.appendChild(modeDiv);
   if (showTuplet) topBar.appendChild(tripletDiv);
   topBar.appendChild(rawIndicator);
   if (showMidiIcon) topBar.append(midiIcon);
@@ -594,9 +631,9 @@ export function mountFullUI(
   rangeRow.append(lowGroup, highGroup);
   pianoShell.appendChild(rangeRow);
 
-  // Hide range row when there is no range keyboard (non-touch, percussion, or
-  // touchRange:false keeps the QWERTY layout).
-  const usesRangeKeyboard = isTouchDevice && options.touchRange !== false;
+  // Hide range row when there is no range keyboard (non-touch without
+  // keyboard:'range', percussion, or touchRange:false keeps the QWERTY layout).
+  const usesRangeKeyboard = (isTouchDevice || options.keyboard === 'range') && options.touchRange !== false;
   if (!usesRangeKeyboard || initPercussion) rangeRow.style.display = 'none';
 
   // Percussion shell: large tap button, wired after piano is created
@@ -648,7 +685,7 @@ export function mountFullUI(
   editRow.append(undoBtn, clearBtn);
 
   if (showDurations) root.appendChild(durRow);
-  root.appendChild(editRow);
+  if (!displayOnly) root.appendChild(editRow);
   if (showLetters)  root.appendChild(lettersWrap);
   // `notationPosition: 'top'` puts the rendered notation ABOVE the keyboard and
   // every control associated with it, rather than below them: in a tall
@@ -713,7 +750,7 @@ export function mountFullUI(
     // nothing for it, rather than building controls into a detached node.
     // QWERTYToABCPiano accepts a null target for each of these.
     durationTarget: showDurations ? durDiv : null,
-    modeTarget:     modeDiv,
+    modeTarget:     displayOnly ? null : modeDiv,
     notationTarget: showNotation ? notationInner : null,
     playbackTarget: showTransport
       ? ((options as QWERTYToABCOptions).playbackTarget ?? playbackDiv)
@@ -829,43 +866,98 @@ export function mountFullUI(
     else        (root as HTMLElement).style.removeProperty('--qwerty-abc-piano-notation-max-height');
   }
 
-  if (isTouchDevice && options.touchRange !== false) {
+  // allowedPitches: the lowest and highest allowed MIDI numbers, read live so
+  // the steppers follow setAllowedPitches().
+  function allowedSpan(): [number, number] | null {
+    const allowed = piano.getAllowedPitches();
+    if (!allowed || allowed.length === 0) return null;
+    return [pitchToMidi(allowed[0])!, pitchToMidi(allowed[allowed.length - 1])!];
+  }
+  // The steppers clamp to the allowed span: once the window reaches the
+  // lowest (highest) allowed note, it cannot move further down (up).
+  const atAllowedLow  = (): boolean => { const a = allowedSpan(); return !!a && WHITE_MIDIS[lowIdx]  <= a[0]; };
+  const atAllowedHigh = (): boolean => { const a = allowedSpan(); return !!a && WHITE_MIDIS[highIdx] >= a[1]; };
+
+  if (usesRangeKeyboard) {
+    // Move the window by octaves until it shows some allowed note.
+    function fitWindowToAllowed(): void {
+      const a = allowedSpan();
+      if (!a) return;
+      while (WHITE_MIDIS[highIdx] < a[0] && highIdx + OCTAVE_STEPS <= WHITE_MIDIS.length - 1) {
+        lowIdx += OCTAVE_STEPS; highIdx += OCTAVE_STEPS;
+      }
+      while (WHITE_MIDIS[lowIdx] > a[1] && lowIdx - OCTAVE_STEPS >= 0) {
+        lowIdx -= OCTAVE_STEPS; highIdx -= OCTAVE_STEPS;
+      }
+    }
+
+    // The low/high steppers widen freely up to the ends of the range (and the
+    // allowed span), and narrow only while the window stays at least MIN_SPAN.
+    const canLowDec  = (): boolean => lowIdx > 0 && !atAllowedLow();
+    const canLowInc  = (): boolean => highIdx - (lowIdx + 1) >= MIN_SPAN;
+    const canHighDec = (): boolean => (highIdx - 1) - lowIdx >= MIN_SPAN;
+    const canHighInc = (): boolean => highIdx < WHITE_MIDIS.length - 1 && !atAllowedHigh();
+
+    function updateSteppers(): void {
+      const low  = midiToNoteString(WHITE_MIDIS[lowIdx]);
+      const high = midiToNoteString(WHITE_MIDIS[highIdx]);
+      lowLabel.textContent  = low;
+      highLabel.textContent = high;
+      octLabel.textContent  = `${low}–${high}`;
+      octDown.disabled = lowIdx - OCTAVE_STEPS < 0 || atAllowedLow();
+      octUp.disabled   = highIdx + OCTAVE_STEPS > WHITE_MIDIS.length - 1 || atAllowedHigh();
+      lowDec.disabled  = !canLowDec();
+      lowInc.disabled  = !canLowInc();
+      highDec.disabled = !canHighDec();
+      highInc.disabled = !canHighInc();
+    }
+
+    function applyRange(): void {
+      updateSteppers();
+      piano.setTouchKeyRange(midiToNoteString(WHITE_MIDIS[lowIdx]), midiToNoteString(WHITE_MIDIS[highIdx]));
+    }
+
     if (pinnedRange) {
+      // Start the steppers from the pinned window when its ends are white
+      // keys inside the stepper limits; otherwise they keep the default.
+      const pinLow  = whiteMidiIndex(pitchToMidi(pinnedRange.low)  ?? -1);
+      const pinHigh = whiteMidiIndex(pitchToMidi(pinnedRange.high) ?? -1);
+      if (pinLow >= 0 && pinHigh >= pinLow) { lowIdx = pinLow; highIdx = pinHigh; }
       piano.setTouchKeyRange(pinnedRange.low, pinnedRange.high);
     } else {
       if (autoRange) highIdx = pickHighIdx((root as HTMLElement).clientWidth);
+      fitWindowToAllowed();
       piano.setTouchKeyRange(
         midiToNoteString(WHITE_MIDIS[lowIdx]),
         midiToNoteString(WHITE_MIDIS[highIdx]),
       );
     }
 
-    function applyRange(): void {
-      const low  = midiToNoteString(WHITE_MIDIS[lowIdx]);
-      const high = midiToNoteString(WHITE_MIDIS[highIdx]);
-      lowLabel.textContent  = low;
-      highLabel.textContent = high;
-      octLabel.textContent  = `${low}–${high}`;
-      octDown.disabled = lowIdx - OCTAVE_STEPS < 0;
-      octUp.disabled   = highIdx + OCTAVE_STEPS > WHITE_MIDIS.length - 1;
-      piano.setTouchKeyRange(low, high);
-    }
-
     // Label + disabled states for the initial window.
-    octLabel.textContent = `${midiToNoteString(WHITE_MIDIS[lowIdx])}–${midiToNoteString(WHITE_MIDIS[highIdx])}`;
-    octDown.disabled = lowIdx - OCTAVE_STEPS < 0;
-    octUp.disabled   = highIdx + OCTAVE_STEPS > WHITE_MIDIS.length - 1;
+    updateSteppers();
+
+    // A new allowed set can move the window and changes where the steppers stop.
+    if (!pinnedRange) {
+      const setAllowed = piano.setAllowedPitches.bind(piano);
+      piano.setAllowedPitches = (pitches) => {
+        setAllowed(pitches);
+        const before = lowIdx;
+        fitWindowToAllowed();
+        if (lowIdx !== before) applyRange();
+        else updateSteppers();
+      };
+    }
 
     // Shift the whole window by an octave, keeping its span. At the ends of the
     // range the buttons are disabled, not hidden, so the layout stays put.
     octDown.addEventListener('click', () => {
-      if (lowIdx - OCTAVE_STEPS < 0) return;
+      if (lowIdx - OCTAVE_STEPS < 0 || atAllowedLow()) return;
       lowIdx  -= OCTAVE_STEPS;
       highIdx -= OCTAVE_STEPS;
       applyRange();
     });
     octUp.addEventListener('click', () => {
-      if (highIdx + OCTAVE_STEPS > WHITE_MIDIS.length - 1) return;
+      if (highIdx + OCTAVE_STEPS > WHITE_MIDIS.length - 1 || atAllowedHigh()) return;
       lowIdx  += OCTAVE_STEPS;
       highIdx += OCTAVE_STEPS;
       applyRange();
@@ -875,12 +967,21 @@ export function mountFullUI(
     // view is created before it is sized, so the first measurement is often 0).
     // setTouchKeyRange wipes and re-renders the SVG, so only act on a real
     // change of board — an unguarded observer would destroy the keyboard on
-    // every resize tick.
+    // every resize tick. Compare with the last pick, not the live highIdx: a
+    // stepper press redraws the board, which changes the mount's height and
+    // fires the observer, and comparing with the live value would undo the
+    // press. Only a change of width class (such as a rotation) re-picks.
     if (autoRange && typeof ResizeObserver !== 'undefined') {
+      let lastPicked = pickHighIdx((root as HTMLElement).clientWidth);
       const ro = new ResizeObserver(() => {
         const picked = pickHighIdx((root as HTMLElement).clientWidth);
-        if (picked === highIdx) return;
-        highIdx = picked;
+        if (picked === lastPicked) return;
+        lastPicked = picked;
+        // Keep the window's bottom note and give it the new board's span, so a
+        // window the user moved up or down does not end up inverted.
+        const span = picked - DEFAULT_LOW_IDX;
+        highIdx = Math.min(WHITE_MIDIS.length - 1, lowIdx + span);
+        lowIdx  = highIdx - span;
         applyRange();
         applyNotationCap();
       });
@@ -890,16 +991,16 @@ export function mountFullUI(
     applyNotationCap();
 
     lowDec.addEventListener('click', () => {
-      if (lowIdx > 0 && lowIdx - 1 <= highIdx - MIN_SPAN) { lowIdx--; applyRange(); }
+      if (canLowDec()) { lowIdx--; applyRange(); }
     });
     lowInc.addEventListener('click', () => {
-      if (lowIdx < highIdx - MIN_SPAN) { lowIdx++; applyRange(); }
+      if (canLowInc()) { lowIdx++; applyRange(); }
     });
     highDec.addEventListener('click', () => {
-      if (highIdx > lowIdx + MIN_SPAN) { highIdx--; applyRange(); }
+      if (canHighDec()) { highIdx--; applyRange(); }
     });
     highInc.addEventListener('click', () => {
-      if (highIdx < WHITE_MIDIS.length - 1 && highIdx + 1 >= lowIdx + MIN_SPAN) { highIdx++; applyRange(); }
+      if (canHighInc()) { highIdx++; applyRange(); }
     });
   }
 
@@ -1125,12 +1226,30 @@ export function mountFullUI(
     connectMidi: () => connectMidi(true),
   };
 
+  // keyboardScope 'focus': the whole mount is the scope. It becomes focusable,
+  // so clicking anywhere in it (or tabbing to it) makes it the instance that
+  // hears the keyboard, and a focus ring shows which one that is.
+  let addedTabindex = false;
+  let addedRole = false;
+  if (options.keyboardScope === 'focus') {
+    root.classList.add('qap-focus-scope');
+    if (!root.hasAttribute('tabindex')) { root.setAttribute('tabindex', '0'); addedTabindex = true; }
+    if (!root.hasAttribute('role')) {
+      root.setAttribute('role', 'group');
+      if (!root.hasAttribute('aria-label')) root.setAttribute('aria-label', 'Piano');
+      addedRole = true;
+    }
+    piano.setScopeElement(root);
+  }
+
   // destroy() also empties the container this mount built into.
   MOUNTED.set(root, piano);
   piano.addTeardown(() => {
     if (MOUNTED.get(root!) === piano) MOUNTED.delete(root!);
     root!.innerHTML = '';
-    root!.classList.remove('qap-full-ui', 'qap-compact');
+    root!.classList.remove('qap-full-ui', 'qap-compact', 'qap-focus-scope');
+    if (addedTabindex) root!.removeAttribute('tabindex');
+    if (addedRole) { root!.removeAttribute('role'); root!.removeAttribute('aria-label'); }
     (root as HTMLElement).style?.removeProperty('--qwerty-abc-piano-notation-max-height');
   });
 
@@ -1161,6 +1280,11 @@ const FULL_UI_STYLE_ID = 'qap-full-ui-styles';
 function _injectFullUIStyles(refEl: Element): void {
   injectStylesInto(refEl, FULL_UI_STYLE_ID, `
     .qap-full-ui { display: flex; flex-direction: column; gap: 0.5rem; font-family: sans-serif; }
+    /* keyboardScope 'focus': show which piano hears the keyboard. */
+    .qap-full-ui.qap-focus-scope { border-radius: 4px; }
+    .qap-full-ui.qap-focus-scope:focus-within {
+      outline: 2px solid var(--qwerty-abc-piano-focus-ring, #1a5fb4); outline-offset: 2px;
+    }
     .qap-shell-bar { display: flex; gap: 0.25rem; }
     .qap-shell-btn {
       padding: 0.35rem 1rem; font-size: 0.85rem; font-weight: 600; font-family: inherit;

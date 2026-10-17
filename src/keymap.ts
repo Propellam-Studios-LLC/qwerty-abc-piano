@@ -1,4 +1,4 @@
-import type { Duration } from './types.js';
+import type { Duration, QwertyAnchor } from './types.js';
 
 export type NoteInfo = {
   note: string;    // base note name, e.g. 'C', 'F#', 'G#'
@@ -43,6 +43,55 @@ export const BLACK_KEYS: Record<string, NoteInfo | null> = {
   'p': { note: 'F#', octave: 4 },
   '[': { note: 'G#', octave: 4 },
 };
+
+// ── C4-anchored layout ───────────────────────────────────────────────────────
+// With `qwertyAnchor: 'C4'` the home row starts on middle C instead:
+// A S D F G H J K L ; ' = C4 D4 E4 F4 G4 A4 B4 C5 D5 E5 F5, and the black keys
+// keep the same stagger (each sits one position to the right of the white key
+// it follows): W E · T Y U · O P = C#4 D#4 · F#4 G#4 A#4 · C#5 D#5.
+// Q, R, I and [ are gaps. Octaves are for shift 0, as above.
+export const WHITE_KEYS_C4: Record<string, NoteInfo> = {
+  'a':  { note: 'C', octave: 4 },
+  's':  { note: 'D', octave: 4 },
+  'd':  { note: 'E', octave: 4 },
+  'f':  { note: 'F', octave: 4 },
+  'g':  { note: 'G', octave: 4 },
+  'h':  { note: 'A', octave: 4 },
+  'j':  { note: 'B', octave: 4 },
+  'k':  { note: 'C', octave: 5 },
+  'l':  { note: 'D', octave: 5 },
+  ';':  { note: 'E', octave: 5 },
+  "'":  { note: 'F', octave: 5 },
+};
+
+export const BLACK_KEYS_C4: Record<string, NoteInfo | null> = {
+  'q': null,
+  'w': { note: 'C#', octave: 4 },
+  'e': { note: 'D#', octave: 4 },
+  'r': null,
+  't': { note: 'F#', octave: 4 },
+  'y': { note: 'G#', octave: 4 },
+  'u': { note: 'A#', octave: 4 },
+  'i': null,
+  'o': { note: 'C#', octave: 5 },
+  'p': { note: 'D#', octave: 5 },
+  '[': null,
+};
+
+/** The home row, left to right. */
+export const WHITE_KEY_ROW = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', "'"] as const;
+/** The row above it, left to right. Position i sits between home-row keys i-1 and i. */
+export const BLACK_KEY_ROW = ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '['] as const;
+
+/** The white- and black-key maps for a QWERTY layout anchor. */
+export function qwertyKeyMaps(anchor: QwertyAnchor): {
+  white: Record<string, NoteInfo>;
+  black: Record<string, NoteInfo | null>;
+} {
+  return anchor === 'C4'
+    ? { white: WHITE_KEYS_C4, black: BLACK_KEYS_C4 }
+    : { white: WHITE_KEYS, black: BLACK_KEYS };
+}
 
 // Duration → ABC note-length suffix, assuming header L:1/4 (quarter note = default unit)
 export const DURATION_MAP: Record<Duration, string> = {
@@ -215,4 +264,78 @@ export function midiNoteToNoteInfo(noteNumber: number): { note: string; octave: 
     note:   MIDI_PITCH_CLASSES[noteNumber % 12],
     octave: Math.floor(noteNumber / 12) - 1,
   };
+}
+
+/** Converts a note name and scientific octave to a MIDI note number (C4 = 60). */
+export function noteToMidi(note: string, octave: number): number {
+  const pc = (MIDI_PITCH_CLASSES as readonly string[]).indexOf(note);
+  if (pc === -1) throw new Error(`qwerty-abc-piano: unknown note "${note}"`);
+  return (octave + 1) * 12 + pc;
+}
+
+const LETTER_PC: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+
+/**
+ * Converts a pitch string to a MIDI note number, or returns null when the
+ * string is not a pitch. Accepts a letter, an optional `#` or `b`, and a
+ * scientific octave: `'C4'` (60), `'F#3'`, `'Bb4'` (= A#4, 70).
+ *
+ * @example
+ * pitchToMidi('C4');  // 60
+ * pitchToMidi('Eb4'); // 63
+ * pitchToMidi('H2');  // null
+ */
+export function pitchToMidi(pitch: string): number | null {
+  const m = /^([A-G])([#b]?)(-?\d)$/.exec(pitch);
+  if (!m) return null;
+  const alter = m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0;
+  const midi = (parseInt(m[3], 10) + 1) * 12 + LETTER_PC[m[1]] + alter;
+  return midi >= 0 && midi <= 127 ? midi : null;
+}
+
+/** Converts a MIDI note number to a pitch string, sharps for black keys: 61 → 'C#4'. */
+export function midiToPitch(midi: number): string {
+  return `${MIDI_PITCH_CLASSES[midi % 12]}${Math.floor(midi / 12) - 1}`;
+}
+
+/**
+ * The QWERTY key that plays `pitch` on the computer keyboard, for a layout
+ * anchor and octave shift, or null when no key plays it at that shift.
+ * Flats are accepted and matched to the black key that sounds them.
+ *
+ * @param pitch - A pitch string such as `'C4'`, `'F#4'` or `'Bb3'`.
+ * @param anchor - `'E3'` (default layout, H = C4) or `'C4'` (A = C4).
+ * @param shift - The octave shift, −2…+2. Default 0.
+ * @throws Error if `pitch` is not a pitch string.
+ *
+ * @example
+ * keyForPitch('C4', 'E3');    // 'h'
+ * keyForPitch('C4', 'C4');    // 'a'
+ * keyForPitch('C5', 'E3', 1); // 'h'
+ */
+export function keyForPitch(pitch: string, anchor: QwertyAnchor = 'E3', shift = 0): string | null {
+  const midi = pitchToMidi(pitch);
+  if (midi === null) throw new Error(`qwerty-abc-piano: invalid pitch "${pitch}"`);
+  const { white, black } = qwertyKeyMaps(anchor);
+  for (const map of [white, black]) {
+    for (const [key, info] of Object.entries(map)) {
+      if (info && noteToMidi(info.note, info.octave + shift) === midi) return key;
+    }
+  }
+  return null;
+}
+
+/**
+ * The pitch a QWERTY key plays for a layout anchor and octave shift (sharps
+ * for black keys), or null for a gap or a key that is not a note key.
+ *
+ * @example
+ * pitchForKey('h');          // 'C4'
+ * pitchForKey('h', 'C4');    // 'A4'
+ * pitchForKey('w', 'C4', 1); // 'C#5'
+ */
+export function pitchForKey(key: string, anchor: QwertyAnchor = 'E3', shift = 0): string | null {
+  const { white, black } = qwertyKeyMaps(anchor);
+  const info = white[key] ?? black[key] ?? null;
+  return info ? `${info.note}${info.octave + shift}` : null;
 }

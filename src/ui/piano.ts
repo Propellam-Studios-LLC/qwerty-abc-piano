@@ -1,4 +1,5 @@
-import type { Mode } from '../types.js';
+import type { Mode, QwertyAnchor, NoteLabels, KeyMark } from '../types.js';
+import { qwertyKeyMaps, WHITE_KEY_ROW, BLACK_KEY_ROW, noteToMidi } from '../keymap.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -22,9 +23,6 @@ const VIEWBOX_H       = 150;
 // comfortable at phone width.
 const VIEWBOX_H_RANGE = 120;
 
-// Default QWERTY layout base range: E3 (52) – A4 (69).
-const DEFAULT_BASE_LOW_MIDI  = 52;
-const DEFAULT_BASE_HIGH_MIDI = 69;
 
 // ── Octave mini-map ──────────────────────────────────────────────────────────
 // A compact white-key strip showing where the currently-playable window sits on
@@ -35,24 +33,24 @@ const MAP_HIGH_MIDI = 95; // B6
 const MAP_STRIDE    = 4;  // px per white key in the strip
 const MAP_H         = 14; // strip height
 
-// White key order: QWERTY key → visual position (left to right)
-// Layout: E3 F3 G3 A3 B3 | C4 D4 E4 F4 G4 A4
-const WHITE_KEY_ORDER = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', "'"] as const;
-const WHITE_KEY_NOTES = ['E', 'F', 'G', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'A'] as const;
-
-// Black keys: leftIdx is the index of the white key immediately to the left.
-// Black key x-center = MARGIN_L + (leftIdx + 1) * WHITE_STRIDE
-const BLACK_KEY_DEFS: ReadonlyArray<{ key: string; leftIdx: number; note: string }> = [
-  { key: 'e', leftIdx: 1, note: 'F#' },   // F#3: between F3(1) and G3(2)
-  { key: 'r', leftIdx: 2, note: 'G#' },   // G#3: between G3(2) and A3(3)
-  { key: 't', leftIdx: 3, note: 'A#' },   // A#3: between A3(3) and B3(4)
-  // gap 'y': B3–C4 (natural half-step, no black key)
-  { key: 'u', leftIdx: 5, note: 'C#' },   // C#4: between C4(5) and D4(6)
-  { key: 'i', leftIdx: 6, note: 'D#' },   // D#4: between D4(6) and E4(7)
-  // gap 'o': E4–F4 (natural half-step, no black key)
-  { key: 'p', leftIdx: 8, note: 'F#' },   // F#4: between F4(8) and G4(9)
-  { key: '[', leftIdx: 9, note: 'G#' },   // G#4: between G4(9) and A4(10)
-];
+/**
+ * The QWERTY layout for an anchor: each home-row key in order with its note
+ * at shift 0, and each black key with the index of the white key to its left
+ * (a black key at row position i sits between white keys i-1 and i).
+ */
+function _qwertyLayout(anchor: QwertyAnchor): {
+  white: Array<{ key: string; note: string; octave: number }>;
+  black: Array<{ key: string; note: string; octave: number; leftIdx: number }>;
+} {
+  const maps = qwertyKeyMaps(anchor);
+  const white = WHITE_KEY_ROW.map(key => ({ key, ...maps.white[key] }));
+  const black: Array<{ key: string; note: string; octave: number; leftIdx: number }> = [];
+  BLACK_KEY_ROW.forEach((key, i) => {
+    const info = maps.black[key];
+    if (info) black.push({ key, ...info, leftIdx: i - 1 });
+  });
+  return { white, black };
+}
 
 // ── Pitch utilities for custom-range keyboards ────────────────────────────────
 
@@ -126,6 +124,10 @@ export interface PianoHost {
   getMode(): Mode;
   getOctave(): number;
   setOctave(shift: number): void;
+  /** The QWERTY layout anchor. Default `'E3'`. */
+  getQwertyAnchor?(): QwertyAnchor;
+  /** The key-label style. Default `'auto'`. */
+  getNoteLabels?(): NoteLabels;
 }
 
 // ── CSS injection (once per document) ────────────────────────────────────────
@@ -248,8 +250,8 @@ function octaveLabel(shift: number, isActive: boolean): string {
  * If `target` already contains an `<svg>` with `data-key` attributes (custom
  * piano SVG), skips rendering and returns the existing element unchanged.
  *
- * Pass `range` to render a custom pitch range instead of the default QWERTY
- * layout (E3–A4). Range keys use pitch-string `data-key` values (e.g. "C4",
+ * Pass `range` to render a custom pitch range instead of the QWERTY layout
+ * (E3–A4 by default, or C4–F5 when the host's anchor is `'C4'`). Range keys use pitch-string `data-key` values (e.g. "C4",
  * "F#3") and show note names rather than QWERTY labels.
  *
  * @throws Error if `range.low` or `range.high` is not a pitch string like "C4".
@@ -265,9 +267,14 @@ export function renderPiano(
   ensureStyles();
 
   // ── Determine layout ──────────────────────────────────────────────────────
+  const anchor = host.getQwertyAnchor?.() ?? 'E3';
+  const labels = host.getNoteLabels?.() ?? 'auto';
+  const shift  = host.getOctave();
   let viewBoxW: number;
-  let renderWhiteKeys: Array<{ dataKey: string; note: string; octave?: number; idx: number; qKey?: string }>;
-  let renderBlackKeys: Array<{ dataKey: string; note: string; leftIdx: number; qKey?: string }>;
+  let renderWhiteKeys: Array<{ dataKey: string; note: string; octave: number; idx: number; qKey?: string }>;
+  let renderBlackKeys: Array<{ dataKey: string; note: string; octave: number; leftIdx: number; qKey?: string }>;
+  let baseLowMidi = 0;
+  let baseHighMidi = 0;
 
   if (range) {
     const lo = parsePitchString(range.low);
@@ -279,19 +286,28 @@ export function renderPiano(
     renderBlackKeys = layout.blackKeys;
   } else {
     viewBoxW = 700;
-    renderWhiteKeys = WHITE_KEY_ORDER.map((qKey, i) => ({
-      dataKey: qKey, note: WHITE_KEY_NOTES[i], idx: i, qKey,
+    const layout = _qwertyLayout(anchor);
+    renderWhiteKeys = layout.white.map((k, i) => ({
+      dataKey: k.key, note: k.note, octave: k.octave, idx: i, qKey: k.key,
     }));
-    renderBlackKeys = BLACK_KEY_DEFS.map(def => ({
-      dataKey: def.key, note: def.note, leftIdx: def.leftIdx, qKey: def.key,
+    renderBlackKeys = layout.black.map(k => ({
+      dataKey: k.key, note: k.note, octave: k.octave, leftIdx: k.leftIdx, qKey: k.key,
     }));
+    const first = layout.white[0];
+    const last  = layout.white[layout.white.length - 1];
+    baseLowMidi  = noteToMidi(first.note, first.octave);
+    baseHighMidi = noteToMidi(last.note, last.octave);
   }
+
+  // Octaves on the QWERTY layout move with the shift; range keys are absolute.
+  const octaveOf = (k: { octave: number }): number => range ? k.octave : k.octave + shift;
 
   const svg = svgEl('svg', {
     class: 'qap-piano',
     viewBox: `0 0 ${viewBoxW} ${range ? VIEWBOX_H_RANGE : VIEWBOX_H}`,
     width: '100%',
     'data-mode': host.getMode(),
+    'data-note-labels': labels,
   }) as SVGSVGElement;
 
   // ── White keys ────────────────────────────────────────────────────────────
@@ -311,11 +327,14 @@ export function renderPiano(
       svg.appendChild(lbl);
     }
 
-    // For range keyboards, label C notes with octave (e.g. "C4") for orientation.
-    const noteLabel = svgEl('text', { class: 'qap-note-name', x: cx, y: KEY_Y + WHITE_H + 11 });
-    noteLabel.textContent = (range && k.note === 'C' && k.octave !== undefined)
-      ? `C${k.octave}`
-      : k.note;
+    // Below the key: the letter; with 'scientific' the full pitch (C4, D4…);
+    // with 'auto' on a range keyboard, each C carries its octave for orientation.
+    const noteLabel = svgEl('text', {
+      class: 'qap-note-name', x: cx, y: KEY_Y + WHITE_H + 11, 'data-for': k.dataKey,
+    });
+    if (labels === 'scientific') noteLabel.textContent = `${k.note}${octaveOf(k)}`;
+    else if (labels === 'auto' && range && k.note === 'C') noteLabel.textContent = `C${k.octave}`;
+    else noteLabel.textContent = k.note;
     svg.appendChild(noteLabel);
   }
 
@@ -334,10 +353,20 @@ export function renderPiano(
       const lbl = svgEl('text', { class: 'qap-key-qwerty qap-key-qwerty-black', x: cx, y: KEY_Y + BLACK_H - 10 });
       lbl.textContent = k.qKey;
       svg.appendChild(lbl);
+      // Scientific labels add the pitch above the QWERTY letter.
+      if (labels === 'scientific') {
+        const name = svgEl('text', {
+          class: 'qap-note-name qap-note-name-black', x: cx, y: KEY_Y + BLACK_H - 26, 'data-for': k.dataKey,
+        });
+        name.textContent = `${k.note}${octaveOf(k)}`;
+        svg.appendChild(name);
+      }
     } else {
       // Range keyboard: show note name on black keys (no QWERTY label available)
-      const lbl = svgEl('text', { class: 'qap-note-name qap-note-name-black', x: cx, y: KEY_Y + BLACK_H - 10 });
-      lbl.textContent = k.note;
+      const lbl = svgEl('text', {
+        class: 'qap-note-name qap-note-name-black', x: cx, y: KEY_Y + BLACK_H - 10, 'data-for': k.dataKey,
+      });
+      lbl.textContent = labels === 'scientific' ? `${k.note}${k.octave}` : k.note;
       svg.appendChild(lbl);
     }
   }
@@ -371,8 +400,8 @@ export function renderPiano(
 
     svg.appendChild(_renderOctaveMiniMap(
       octCenterX + 3 * OCT_SPACING,
-      DEFAULT_BASE_LOW_MIDI,
-      DEFAULT_BASE_HIGH_MIDI,
+      baseLowMidi,
+      baseHighMidi,
       currentOctave,
     ));
   }
@@ -430,4 +459,60 @@ export function updateOctaveIndicator(target: Element, shift: number): void {
  */
 export function updatePianoMode(target: Element, mode: Mode): void {
   target.querySelector('svg.qap-piano')?.setAttribute('data-mode', mode);
+}
+
+/**
+ * Rewrites the scientific pitch labels after an octave shift. Only labels in
+ * `'scientific'` style name an octave that moves with the shift; other styles
+ * are left alone.
+ *
+ * @param pitchOf - Maps a key's `data-key` to its current pitch string.
+ */
+export function updateNoteLabels(target: Element, pitchOf: (dataKey: string) => string | null): void {
+  const svg = target.querySelector('svg.qap-piano');
+  if (!svg || svg.getAttribute('data-note-labels') !== 'scientific') return;
+  for (const t of svg.querySelectorAll<SVGElement>('text.qap-note-name[data-for]')) {
+    const pitch = pitchOf(t.getAttribute('data-for') ?? '');
+    if (pitch) t.textContent = pitch;
+  }
+}
+
+/** The CSS class each {@link KeyMark} state puts on a key. */
+const MARK_CLASSES: Record<KeyMark, string> = {
+  correct: 'qap-mark-correct',
+  wrong:   'qap-mark-wrong',
+  missed:  'qap-mark-missed',
+};
+
+/**
+ * Applies the persistent key states to every key of the drawn piano: greyed
+ * (`qap-key-disabled`, for a pitch outside `allowed`), highlighted
+ * (`qap-key-highlight`) and marked (`qap-mark-correct` / `-wrong` /
+ * `-missed`). These are independent of the transient pressed `active` class.
+ *
+ * @param midiOf - Maps a key's `data-key` to its current MIDI note number.
+ * @returns The MIDI note numbers of the keys that are drawn.
+ */
+export function applyKeyStates(
+  target: Element,
+  midiOf: (dataKey: string) => number | null,
+  state: {
+    allowed: ReadonlySet<number> | null;
+    highlight: ReadonlySet<number>;
+    marks: ReadonlyMap<number, KeyMark>;
+  },
+): Set<number> {
+  const drawn = new Set<number>();
+  const svg = target.querySelector('svg');
+  if (!svg) return drawn;
+  for (const key of svg.querySelectorAll<SVGElement>('[data-key]')) {
+    const midi = midiOf(key.getAttribute('data-key') ?? '');
+    if (midi === null) continue;
+    drawn.add(midi);
+    key.classList.toggle('qap-key-disabled', state.allowed !== null && !state.allowed.has(midi));
+    key.classList.toggle('qap-key-highlight', state.highlight.has(midi));
+    const mark = state.marks.get(midi);
+    for (const [m, cls] of Object.entries(MARK_CLASSES)) key.classList.toggle(cls, mark === m);
+  }
+  return drawn;
 }

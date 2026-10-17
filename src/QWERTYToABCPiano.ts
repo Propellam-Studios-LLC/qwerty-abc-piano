@@ -1,8 +1,8 @@
-import { type Duration, type Mode, type NoteEntry, type QWERTYToABCOptions, type MIDIAccess, type MIDIInput, type MIDIMessageEvent, type AbcjsSynthController, type MidiEnableResult } from './types.js';
-import { DURATION_MAP, DOTTED_DURATION_MAP, DURATION_BEATS, WHITE_KEYS, BLACK_KEYS, NOTE_KEYS, getKeyImpliedSharps, getKeyImpliedFlats, SHARP_TO_FLAT_LETTER, FLAT_TO_SHARP_NOTE, midiNoteToNoteInfo } from './keymap.js';
+import { type Duration, type Mode, type NoteEntry, type QWERTYToABCOptions, type MIDIAccess, type MIDIInput, type MIDIMessageEvent, type AbcjsSynthController, type MidiEnableResult, type QwertyAnchor, type NoteLabels, type KeyMark, type AllowedPitches, type NoteSource } from './types.js';
+import { DURATION_MAP, DOTTED_DURATION_MAP, DURATION_BEATS, NOTE_KEYS, getKeyImpliedSharps, getKeyImpliedFlats, SHARP_TO_FLAT_LETTER, FLAT_TO_SHARP_NOTE, midiNoteToNoteInfo, qwertyKeyMaps, noteToMidi, pitchToMidi, midiToPitch } from './keymap.js';
 import { renderDurationButtons, updateDurationButtons } from './ui/durationButtons.js';
 import { renderModeToggle, updateModeToggle } from './ui/modeToggle.js';
-import { renderPiano, highlightKey, unhighlightKey, updateOctaveIndicator, updatePianoMode, parsePitchString } from './ui/piano.js';
+import { renderPiano, highlightKey, unhighlightKey, updateOctaveIndicator, updatePianoMode, parsePitchString, applyKeyStates, updateNoteLabels } from './ui/piano.js';
 import { renderTapButton } from './ui/tapButton.js';
 import { resolveTarget } from './ui/utils.js';
 import { injectStylesInto } from './domStyles.js';
@@ -20,6 +20,28 @@ const DEFAULTS = {
 } as const;
 
 const LIB_STYLE_ID = 'qwerty-abc-piano-lib-styles';
+
+const KEY_MARKS: ReadonlySet<string> = new Set(['correct', 'wrong', 'missed']);
+
+/** Parses a list of pitch strings or a `{ low, high }` range into MIDI numbers. */
+function parseAllowedPitches(pitches: AllowedPitches | undefined): Set<number> | null {
+  if (pitches === null || pitches === undefined) return null;
+  const toMidi = (p: string): number => {
+    const midi = typeof p === 'string' ? pitchToMidi(p) : null;
+    if (midi === null) throw new Error(`qwerty-abc-piano: invalid pitch "${String(p)}"`);
+    return midi;
+  };
+  if (Array.isArray(pitches)) return new Set(pitches.map(toMidi));
+  if (typeof pitches === 'object') {
+    const low = toMidi(pitches.low);
+    const high = toMidi(pitches.high);
+    if (low > high) throw new Error(`qwerty-abc-piano: allowed range "${pitches.low}"–"${pitches.high}" is reversed`);
+    const set = new Set<number>();
+    for (let m = low; m <= high; m++) set.add(m);
+    return set;
+  }
+  throw new Error('qwerty-abc-piano: allowedPitches must be a list of pitches, { low, high } or null');
+}
 
 // ── Raw ABC passthrough ────────────────────────────────────────────────────
 // Characters that, when typed in transcribe mode, open a raw-ABC capture
@@ -127,6 +149,26 @@ export class QWERTYToABCPiano {
   private static readonly PERCUSSION_NOTE   = 'B';
   private static readonly PERCUSSION_OCTAVE = 4;  // B4 = 'B' in ABC (the treble staff's middle line; snare convention)
 
+  // Teaching state. Pitches are stored as MIDI numbers, so they survive any
+  // re-render and follow the octave shift on the QWERTY layout.
+  private readonly _qwertyAnchor: QwertyAnchor;
+  private _noteLabels: NoteLabels;
+  private _allowedMidi: Set<number> | null;
+  private _highlightMidi = new Set<number>();
+  private _marks = new Map<number, KeyMark>();
+  private _touchRange: { low: string; high: string } | null = null;
+  private _customPiano = false;
+  // QWERTY key → the data-key it lit, so keyup clears the right key on a range board.
+  private readonly _pressedKeys = new Map<string, string>();
+
+  // keyboardScope: 'focus'. The scope element is where focus and pointer
+  // interaction make this instance the active one.
+  private readonly _keyboardScope: 'document' | 'focus';
+  private _scopeEl: Element | null = null;
+  private _scopeTeardown: (() => void) | null = null;
+  private static readonly _focusScoped = new Set<QWERTYToABCPiano>();
+  private static _lastInteracted: QWERTYToABCPiano | null = null;
+
   // Selection state
   private _selectedIndex: number | null = null;
   private _lastTuneObject: unknown = null;
@@ -225,7 +267,19 @@ export class QWERTYToABCPiano {
       showNoteNames:          options.showNoteNames          ?? true,
       percussionMode:         options.percussionMode         ?? false,
       octaveShift:        options.octaveShift        ?? 0,
+      qwertyAnchor:       options.qwertyAnchor       ?? 'E3',
+      noteLabels:         options.noteLabels         ?? 'auto',
+      allowedPitches:     options.allowedPitches     ?? null,
+      keyboardScope:      options.keyboardScope      ?? 'document',
+      onNotePlayed:       options.onNotePlayed       ?? null,
     };
+    if (this._options.qwertyAnchor !== 'E3' && this._options.qwertyAnchor !== 'C4') {
+      throw new Error(`qwerty-abc-piano: qwertyAnchor must be 'E3' or 'C4', got "${String(this._options.qwertyAnchor)}"`);
+    }
+    this._qwertyAnchor  = this._options.qwertyAnchor;
+    this._noteLabels    = this._validNoteLabels(this._options.noteLabels);
+    this._allowedMidi   = parseAllowedPitches(this._options.allowedPitches);
+    this._keyboardScope = this._options.keyboardScope === 'focus' ? 'focus' : 'document';
     // The starting octave shift (clamped to −2…+2, like setOctave). A host whose
     // material sits higher or lower than the default E3–A4 keyboard (e.g. fiddle
     // tunes around C5) can start the keys an octave up with `octaveShift: 1`.
@@ -266,8 +320,11 @@ export class QWERTYToABCPiano {
       if (this._percussionMode) {
         renderTapButton(this._pianoTarget, this);
       } else {
+        const existing = this._pianoTarget.querySelector('svg');
+        this._customPiano = !!existing?.querySelector('[data-key]');
         renderPiano(this._pianoTarget, this);
         this._applyLabelVisibility();
+        this._decoratePiano();
       }
     }
 
@@ -305,6 +362,11 @@ export class QWERTYToABCPiano {
     document.addEventListener('keyup',   this._boundKeyUp);
 
     if (this._options.enableMidi) void this._initMidi(true);
+
+    if (this._keyboardScope === 'focus') {
+      QWERTYToABCPiano._focusScoped.add(this);
+      this.setScopeElement(this._pianoTarget ?? this._notationTarget);
+    }
 
     // Touch support for piano keys (skipped in percussion mode — tap button handles its own touch)
     if (this._pianoTarget && !this._percussionMode && this._options.enableTouch !== false) {
@@ -551,6 +613,11 @@ export class QWERTYToABCPiano {
 
         const key = el?.closest('[data-key]')?.getAttribute('data-key');
         if (!key) continue;
+        // QWERTY keys are relative to the layout's home octave (the ± shift
+        // moves them); pitch-string keys ("C4", "F#3") on a range keyboard are
+        // ABSOLUTE, since each is labelled with its own pitch.
+        const midi = this._midiForDataKey(key);
+        if (midi === null || !this._isAllowed(midi)) continue;
         this._activeTouches.set(touch.identifier, key);
 
         // If this is the second+ finger and we're NOT already in sim mode, open it
@@ -558,24 +625,9 @@ export class QWERTYToABCPiano {
           this._openSimultaneous();
         }
 
-        const white = WHITE_KEYS[key];
-        const black = white ? null : BLACK_KEYS[key];
-        const qwertyInfo = white ?? black;
-        if (qwertyInfo) {
-          // QWERTY keys are relative to the layout's home octave — the ± shift
-          // is what moves them.
-          this._handleNoteFromPitch(qwertyInfo.note, qwertyInfo.octave + this._octaveShift);
-          if (this._pianoTarget) highlightKey(this._pianoTarget, key);
-          continue;
-        }
-        // Pitch-string keys (e.g. "C4", "F#3") on a custom-range touch keyboard
-        // are ABSOLUTE: the key is labelled with its own pitch, so the octave
-        // shift is not added (otherwise the key labelled C4 would emit C5).
-        const pitchInfo = parsePitchString(key);
-        if (pitchInfo) {
-          this._handleNoteFromPitch(pitchInfo.note, pitchInfo.octave);
-          if (this._pianoTarget) highlightKey(this._pianoTarget, key);
-        }
+        const { note, octave } = midiNoteToNoteInfo(midi);
+        this._handleNoteFromPitch(note, octave, 'touch');
+        if (this._pianoTarget) highlightKey(this._pianoTarget, key);
       }
     };
 
@@ -674,6 +726,15 @@ export class QWERTYToABCPiano {
       // green chord-mode fill above, and placed after it, so the flash wins.
       'svg.qap-piano.qap-simultaneous-active rect.qap-key-white.active { fill: var(--qwerty-abc-piano-sim-flash, #1a5fb4); }',
       'svg.qap-piano.qap-simultaneous-active rect.qap-key-black.active { fill: var(--qwerty-abc-piano-sim-flash-dark, #114a8a); }',
+      // Teaching states: greyed (outside allowedPitches), marked, highlighted.
+      // Placed after the chord-mode fill so they stay visible while a chord is
+      // built; `:not(.active)` lets a pressed key still flash its own colour.
+      'svg.qap-piano rect.qap-key-white.qap-key-disabled { fill: var(--qwerty-abc-piano-disabled-fill, #e2e2e2); cursor: not-allowed; }',
+      'svg.qap-piano rect.qap-key-black.qap-key-disabled { fill: var(--qwerty-abc-piano-disabled-fill-black, #9a9a9a); cursor: not-allowed; }',
+      'svg.qap-piano rect.qap-mark-correct:not(.active) { fill: var(--qwerty-abc-piano-mark-correct, #2a9d4a); }',
+      'svg.qap-piano rect.qap-mark-wrong:not(.active) { fill: var(--qwerty-abc-piano-mark-wrong, #d05c54); }',
+      'svg.qap-piano rect.qap-mark-missed:not(.active) { fill: var(--qwerty-abc-piano-mark-missed, #e0a526); }',
+      'svg.qap-piano rect.qap-key-highlight:not(.active) { fill: var(--qwerty-abc-piano-highlight-color, #4a90d9); }',
       // Touch support
       'svg.qap-piano { touch-action: none; user-select: none; -webkit-user-select: none; }',
       // ── Control button base ───────────────────────────────────────────────
@@ -1381,6 +1442,207 @@ export class QWERTYToABCPiano {
     }
   }
 
+  // ── Teaching features ────────────────────────────────────────────────────
+
+  /**
+   * Highlights keys in the playback colour, e.g. to show a melody or chord
+   * as it plays. Replaces the current highlight. The highlight is separate
+   * from the pressed-key colour and from {@link markKeys}, survives re-renders
+   * and octave shifts, and on the QWERTY layout follows the pitch to whichever
+   * key plays it at the current shift.
+   *
+   * Styled by the class `qap-key-highlight` and the CSS custom property
+   * `--qwerty-abc-piano-highlight-color` (default `#4a90d9`).
+   *
+   * @param pitches - Pitch strings such as `'E4'`, `'F#3'` or `'Bb4'`.
+   * @returns The pitches that are not on the drawn keyboard (and so show
+   *   nothing until the board or shift brings them into view).
+   * @throws Error if a pitch is not a pitch string.
+   *
+   * @example
+   * piano.highlightPitches(['C4', 'E4', 'G4']); // a C major chord
+   * piano.clearHighlight();
+   */
+  highlightPitches(pitches: string[]): string[] {
+    const next = new Set<number>();
+    for (const p of pitches) next.add(this._requirePitch(p));
+    this._highlightMidi = next;
+    return this._offBoard(pitches);
+  }
+
+  /** Removes every key highlight set by {@link highlightPitches}. */
+  clearHighlight(): void {
+    this._highlightMidi = new Set();
+    this._decoratePiano();
+  }
+
+  /**
+   * Colours keys with a feedback state: `'correct'`, `'wrong'` or `'missed'`.
+   * Replaces the current marks. Marks are separate from the pressed-key
+   * colour and from {@link highlightPitches} (a highlight is drawn over a
+   * mark), and survive re-renders and octave shifts.
+   *
+   * Styled by the classes `qap-mark-correct`, `qap-mark-wrong`,
+   * `qap-mark-missed` and the CSS custom properties
+   * `--qwerty-abc-piano-mark-correct` (default `#2a9d4a`),
+   * `--qwerty-abc-piano-mark-wrong` (`#d05c54`) and
+   * `--qwerty-abc-piano-mark-missed` (`#e0a526`).
+   *
+   * @param marks - Pitch string → state.
+   * @returns The marked pitches that are not on the drawn keyboard.
+   * @throws Error if a pitch is not a pitch string or a state is unknown.
+   *
+   * @example
+   * piano.markKeys({ D4: 'correct', C4: 'wrong', 'F#4': 'missed' });
+   * piano.clearMarks();
+   */
+  markKeys(marks: Record<string, KeyMark>): string[] {
+    const next = new Map<number, KeyMark>();
+    for (const [p, state] of Object.entries(marks)) {
+      if (!KEY_MARKS.has(state)) {
+        throw new Error(`qwerty-abc-piano: unknown mark "${String(state)}" (use 'correct', 'wrong' or 'missed')`);
+      }
+      next.set(this._requirePitch(p), state);
+    }
+    this._marks = next;
+    return this._offBoard(Object.keys(marks));
+  }
+
+  /** Removes every mark set by {@link markKeys}. */
+  clearMarks(): void {
+    this._marks = new Map();
+    this._decoratePiano();
+  }
+
+  /**
+   * Restricts input to a set of pitches, or `null` to allow every pitch. Keys
+   * outside the set are greyed out (class `qap-key-disabled`, colour
+   * `--qwerty-abc-piano-disabled-fill`) and ignored on every input path:
+   * touch, the computer keyboard and MIDI.
+   *
+   * @param pitches - A list of pitch strings, a `{ low, high }` range
+   *   (inclusive), or `null`.
+   * @throws Error if a pitch is not a pitch string, or `low` is above `high`.
+   *
+   * @example
+   * piano.setAllowedPitches({ low: 'C4', high: 'G4' }); // the five-finger position
+   * piano.setAllowedPitches(['C4', 'E4', 'G4']);
+   * piano.setAllowedPitches(null);
+   */
+  setAllowedPitches(pitches: AllowedPitches): void {
+    this._allowedMidi = parseAllowedPitches(pitches);
+    this._decoratePiano();
+  }
+
+  /** The allowed pitches, lowest first (sharps for black keys), or null when every pitch is allowed. */
+  getAllowedPitches(): string[] | null {
+    if (!this._allowedMidi) return null;
+    return [...this._allowedMidi].sort((a, b) => a - b).map(midiToPitch);
+  }
+
+  /**
+   * Changes how the on-screen keys are labelled and redraws the piano; see
+   * {@link NoteLabels}. Highlights, marks and greyed keys are kept.
+   *
+   * @param labels - `'auto'`, `'letters'` or `'scientific'`.
+   * @throws Error for any other value.
+   */
+  setNoteLabels(labels: NoteLabels): void {
+    this._noteLabels = this._validNoteLabels(labels);
+    this._rerenderPiano();
+  }
+
+  /** The current key-label style. */
+  getNoteLabels(): NoteLabels {
+    return this._noteLabels;
+  }
+
+  /** The QWERTY layout anchor this instance was created with: `'E3'` or `'C4'`. */
+  getQwertyAnchor(): QwertyAnchor {
+    return this._qwertyAnchor;
+  }
+
+  /**
+   * Sets the element whose focus and pointer interaction make this instance
+   * the active one under `keyboardScope: 'focus'`. Defaults to the piano
+   * target (or the notation target).
+   * @internal Used by mountFullUI; not part of the supported public API.
+   */
+  setScopeElement(el: Element | null): void {
+    this._scopeTeardown?.();
+    this._scopeTeardown = null;
+    this._scopeEl = el;
+    if (!el || this._keyboardScope !== 'focus') return;
+    const activate = (): void => { QWERTYToABCPiano._lastInteracted = this; };
+    const opts = { capture: true, passive: true } as const;
+    el.addEventListener('pointerdown', activate, opts);
+    el.addEventListener('touchstart', activate, opts);
+    el.addEventListener('mousedown', activate, opts);
+    el.addEventListener('focusin', activate);
+    this._scopeTeardown = () => {
+      el.removeEventListener('pointerdown', activate, opts);
+      el.removeEventListener('touchstart', activate, opts);
+      el.removeEventListener('mousedown', activate, opts);
+      el.removeEventListener('focusin', activate);
+    };
+  }
+
+  /**
+   * The focus-scoped instance that hears the keyboard: the one with focus
+   * inside its scope element, or else the one most recently interacted with.
+   */
+  private static _activeFocusInstance(): QWERTYToABCPiano | null {
+    for (const inst of QWERTYToABCPiano._focusScoped) {
+      const el = inst._scopeEl;
+      if (!el) continue;
+      const root = el.getRootNode() as Document | ShadowRoot;
+      const focused = root.activeElement;
+      if (focused && el.contains(focused)) return inst;
+    }
+    const last = QWERTYToABCPiano._lastInteracted;
+    return last && QWERTYToABCPiano._focusScoped.has(last) ? last : null;
+  }
+
+  private _validNoteLabels(labels: unknown): NoteLabels {
+    if (labels === 'auto' || labels === 'letters' || labels === 'scientific') return labels;
+    throw new Error(`qwerty-abc-piano: noteLabels must be 'auto', 'letters' or 'scientific', got "${String(labels)}"`);
+  }
+
+  private _requirePitch(pitch: string): number {
+    const midi = typeof pitch === 'string' ? pitchToMidi(pitch) : null;
+    if (midi === null) throw new Error(`qwerty-abc-piano: invalid pitch "${String(pitch)}"`);
+    return midi;
+  }
+
+  private _isAllowed(midi: number): boolean {
+    return this._allowedMidi === null || this._allowedMidi.has(midi);
+  }
+
+  /** The MIDI number a drawn key plays now: QWERTY keys via the anchor and shift, range keys absolutely. */
+  private _midiForDataKey(dataKey: string): number | null {
+    const { white, black } = qwertyKeyMaps(this._qwertyAnchor);
+    const info = white[dataKey] ?? black[dataKey];
+    if (info) return noteToMidi(info.note, info.octave + this._octaveShift);
+    const pitch = parsePitchString(dataKey);
+    return pitch ? noteToMidi(pitch.note, pitch.octave) : null;
+  }
+
+  /** Re-applies greyed, highlighted and marked keys; returns the drawn MIDI numbers. */
+  private _decoratePiano(): Set<number> {
+    if (!this._pianoTarget) return new Set();
+    return applyKeyStates(this._pianoTarget, k => this._midiForDataKey(k), {
+      allowed: this._allowedMidi,
+      highlight: this._highlightMidi,
+      marks: this._marks,
+    });
+  }
+
+  /** Applies the key states and returns those of `pitches` that are not drawn. */
+  private _offBoard(pitches: string[]): string[] {
+    const drawn = this._decoratePiano();
+    return pitches.filter(p => !drawn.has(pitchToMidi(p)!));
+  }
+
   /** Show or hide QWERTY key labels on the piano. Remembered across re-renders. */
   setShowKeyLabels(show: boolean): void {
     this._showKeyLabels = show;
@@ -1642,12 +1904,21 @@ export class QWERTYToABCPiano {
 
   /**
    * Sets the absolute octave shift applied to the QWERTY keys (clamped to
-   * −2…+2). At 0 the keys span E3–A4; `1` moves them up an octave. MIDI input
-   * and custom-range touch keys are absolute and are not shifted.
+   * −2…+2). At 0 the keys span E3–A4 (C4–F5 with `qwertyAnchor: 'C4'`); `1`
+   * moves them up an octave. MIDI input and custom-range touch keys are
+   * absolute and are not shifted. Highlights, marks and greyed keys follow
+   * their pitches to the new keys.
    */
   setOctave(shift: number): void {
     this._octaveShift = Math.max(-2, Math.min(2, shift));
-    if (this._pianoTarget) updateOctaveIndicator(this._pianoTarget, this._octaveShift);
+    if (this._pianoTarget) {
+      updateOctaveIndicator(this._pianoTarget, this._octaveShift);
+      updateNoteLabels(this._pianoTarget, k => {
+        const midi = this._midiForDataKey(k);
+        return midi === null ? null : midiToPitch(midi);
+      });
+      this._decoratePiano();
+    }
   }
 
   /** The current octave shift, −2…+2. */
@@ -1740,10 +2011,24 @@ export class QWERTYToABCPiano {
     }
     if (!this._pianoTarget || this._percussionMode) return;
 
-    const range = (low && high) ? { low, high } : undefined;
+    this._touchRange = (low && high) ? { low, high } : null;
+    this._customPiano = false;
+    this._rerenderPiano();
+  }
+
+  /** The range keyboard's `{ low, high }`, or null on the QWERTY layout. */
+  getTouchKeyRange(): { low: string; high: string } | null {
+    return this._touchRange ? { ...this._touchRange } : null;
+  }
+
+  /** Redraws the piano (current range, labels, key states) and re-attaches touch. */
+  private _rerenderPiano(): void {
+    if (!this._pianoTarget || this._percussionMode || this._customPiano) return;
     this._pianoTarget.innerHTML = '';
-    renderPiano(this._pianoTarget, this, range);
+    this._pressedKeys.clear();
+    renderPiano(this._pianoTarget, this, this._touchRange ?? undefined);
     this._applyLabelVisibility();
+    this._decoratePiano();
     if (this._options.enableTouch !== false) {
       this._attachTouchListeners(this._pianoTarget);
     }
@@ -1850,7 +2135,7 @@ export class QWERTYToABCPiano {
   /** Records one note at the fixed percussion pitch (B4, written `B`). No-op when not in percussion mode. */
   tap(): void {
     if (!this._percussionMode) return;
-    this._handleNoteFromPitch(QWERTYToABCPiano.PERCUSSION_NOTE, QWERTYToABCPiano.PERCUSSION_OCTAVE);
+    this._handleNoteFromPitch(QWERTYToABCPiano.PERCUSSION_NOTE, QWERTYToABCPiano.PERCUSSION_OCTAVE, null);
   }
 
   /**
@@ -1878,6 +2163,11 @@ export class QWERTYToABCPiano {
   destroy(): void {
     this._destroyed = true;
     this._cancelSimultaneous();
+
+    this._scopeTeardown?.();
+    this._scopeTeardown = null;
+    QWERTYToABCPiano._focusScoped.delete(this);
+    if (QWERTYToABCPiano._lastInteracted === this) QWERTYToABCPiano._lastInteracted = null;
 
     for (const fn of this._teardowns) { try { fn(); } catch { /* non-fatal */ } }
     this._teardowns = [];
@@ -1954,45 +2244,54 @@ export class QWERTYToABCPiano {
     this._fireEvent('duration-change', { duration, isDotted });
   }
 
-  // Shared entry point for QWERTY and MIDI once the absolute pitch is known.
-  private _handleNoteFromPitch(note: string, absoluteOctave: number): void {
+  // Shared entry point for every input once the absolute pitch is known.
+  // Returns false when the pitch is outside allowedPitches and was ignored.
+  // `source` is null for the fixed percussion pitch, which is never filtered
+  // or reported to onNotePlayed.
+  private _handleNoteFromPitch(note: string, absoluteOctave: number, source: NoteSource | null): boolean {
+    const midi = noteToMidi(note, absoluteOctave);
+    if (source !== null && !this._isAllowed(midi)) return false;
+    const sounds = this._simultaneousActive || !this._restMode;
     if (this._simultaneousActive) {
       this._simultaneousBuffer.push({ note, octave: absoluteOctave });
       this._fireSimultaneousChange(true, this._simultaneousBuffer.length);
       this._renderNotation(); // live preview of the chord as it's built
       this._playNoteAudio(note, absoluteOctave);
-      return;
-    }
-    if (this._mode === 'transcribe') {
-      if (this._restMode) {
-        this._addRest();
-      } else {
-        this._addNote(note, absoluteOctave);
+    } else {
+      if (this._mode === 'transcribe') {
+        if (this._restMode) {
+          this._addRest();
+        } else {
+          this._addNote(note, absoluteOctave);
+        }
       }
+      if (!this._restMode) this._playNoteAudio(note, absoluteOctave);
     }
-    if (!this._restMode) this._playNoteAudio(note, absoluteOctave);
+    if (sounds && source !== null && !this._percussionMode) {
+      this._options.onNotePlayed?.({ pitch: midiToPitch(midi), midi, source });
+    }
+    return true;
   }
 
   private _handleNoteKey(key: string): void {
+    const { white, black } = qwertyKeyMaps(this._qwertyAnchor);
+    const info = white[key] ?? black[key] ?? null; // null = gap key or not a note key
     if (this._percussionMode) {
       // In percussion mode all piano keys map to the fixed pitch; skip highlight (no SVG)
-      if (key in WHITE_KEYS || (key in BLACK_KEYS && BLACK_KEYS[key] !== null)) {
-        this._handleNoteFromPitch(QWERTYToABCPiano.PERCUSSION_NOTE, QWERTYToABCPiano.PERCUSSION_OCTAVE);
+      if (info) {
+        this._handleNoteFromPitch(QWERTYToABCPiano.PERCUSSION_NOTE, QWERTYToABCPiano.PERCUSSION_OCTAVE, null);
       }
       return;
     }
-    const white = WHITE_KEYS[key];
-    if (white) {
-      this._handleNoteFromPitch(white.note, white.octave + this._octaveShift);
-      if (this._pianoTarget) highlightKey(this._pianoTarget, key);
-      return;
-    }
-    if (key in BLACK_KEYS) {
-      const black = BLACK_KEYS[key];
-      if (black !== null) { // null = gap key (q, t, i) — silently ignored
-        this._handleNoteFromPitch(black.note, black.octave + this._octaveShift);
-        if (this._pianoTarget) highlightKey(this._pianoTarget, key);
-      }
+    if (!info) return;
+    const octave = info.octave + this._octaveShift;
+    if (!this._handleNoteFromPitch(info.note, octave, 'qwerty')) return;
+    if (this._pianoTarget) {
+      // The QWERTY layout lights the key itself; a range keyboard lights the
+      // key for the pitch, when it is drawn.
+      const dataKey = this._touchRange ? midiToPitch(noteToMidi(info.note, octave)) : key;
+      highlightKey(this._pianoTarget, dataKey);
+      this._pressedKeys.set(key, dataKey);
     }
   }
 
@@ -2008,8 +2307,17 @@ export class QWERTYToABCPiano {
     const command  = status & 0xf0;
     const isNoteOn = command === 0x90 && velocity > 0;
     if (!isNoteOn) return;
+    // keyboardScope 'focus': Web MIDI reaches only the active instance. An
+    // input's message handler is a single slot, so the instance that holds it
+    // forwards to the active one when that one has no MIDI access of its own.
+    let receiver: QWERTYToABCPiano | null = this;
+    if (this._keyboardScope === 'focus') {
+      const active = QWERTYToABCPiano._activeFocusInstance();
+      receiver = active === this || (active && !active._midiAccess) ? active : null;
+    }
+    if (!receiver) return;
     const { note, octave } = midiNoteToNoteInfo(noteNumber);
-    this._handleNoteFromPitch(note, octave);
+    receiver._handleNoteFromPitch(note, octave, 'midi');
   }
 
   /**
@@ -2142,7 +2450,7 @@ export class QWERTYToABCPiano {
     if (velocity <= 0) return;
     if (!Number.isFinite(noteNumber) || noteNumber < 0 || noteNumber > 127) return;
     const { note, octave } = midiNoteToNoteInfo(Math.round(noteNumber));
-    this._handleNoteFromPitch(note, octave);
+    this._handleNoteFromPitch(note, octave, 'midi');
   }
 
   /** Handle a keystroke while a raw-ABC token is being typed. Returns true when
@@ -2197,6 +2505,9 @@ export class QWERTYToABCPiano {
   private _onKeyDown(event: KeyboardEvent): void {
     // Mid-composition keystrokes belong to the IME, not the piano.
     if (event.isComposing) return;
+
+    // keyboardScope 'focus': only the active instance hears the keyboard.
+    if (this._keyboardScope === 'focus' && QWERTYToABCPiano._activeFocusInstance() !== this) return;
 
     // The real origin of the key, even from inside a shadow root (where
     // `event.target` is retargeted to the shadow host).
@@ -2369,7 +2680,11 @@ export class QWERTYToABCPiano {
 
   private _onKeyUp(event: KeyboardEvent): void {
     const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
-    if (this._pianoTarget) unhighlightKey(this._pianoTarget, key);
+    if (!this._pianoTarget) return;
+    const dataKey = this._pressedKeys.get(key);
+    this._pressedKeys.delete(key);
+    unhighlightKey(this._pianoTarget, key);
+    if (dataKey && dataKey !== key) unhighlightKey(this._pianoTarget, dataKey);
   }
 }
 

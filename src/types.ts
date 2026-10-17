@@ -12,6 +12,45 @@ export type Duration = 'w' | 'h' | 'q' | 'e' | 's' | 't';
 export type Mode = 'play' | 'transcribe';
 
 /**
+ * Where the computer-keyboard layout starts. `'E3'` (the default): the home
+ * row A S D F G H J K L ; ' plays E3–A4 with H on middle C. `'C4'`: the home
+ * row plays C4–F5, starting on middle C, with W E T Y U O P as the black keys
+ * C#4 D#4 F#4 G#4 A#4 C#5 D#5. The octave shift moves either layout.
+ */
+export type QwertyAnchor = 'E3' | 'C4';
+
+/**
+ * How the on-screen piano labels its keys. `'auto'` (default): letters on the
+ * QWERTY layout; on a range keyboard, letters with the octave on each C
+ * (`C4`). `'letters'`: letters only. `'scientific'`: every key carries its
+ * scientific pitch name, white (`C4`, `D4`, …) and black (`C#4`, …).
+ */
+export type NoteLabels = 'auto' | 'letters' | 'scientific';
+
+/** A feedback state for {@link QWERTYToABCPiano.markKeys}. */
+export type KeyMark = 'correct' | 'wrong' | 'missed';
+
+/**
+ * The pitches that can be played. A list of pitch strings (`['C4', 'E4',
+ * 'G4']`), or an inclusive range (`{ low: 'C4', high: 'G4' }`). `null` allows
+ * every pitch. Flats are accepted (`'Bb3'`).
+ */
+export type AllowedPitches = string[] | { low: string; high: string } | null;
+
+/** Where a played note came from. */
+export type NoteSource = 'qwerty' | 'touch' | 'midi';
+
+/**
+ * The argument of `onNotePlayed`: the pitch as a string with sharps for black
+ * keys (`'C#4'`), its MIDI note number (60 = C4) and the input it came from.
+ */
+export interface NotePlayedEvent {
+  pitch: string;
+  midi: number;
+  source: NoteSource;
+}
+
+/**
  * The outcome of asking for Web MIDI access. Besides success there are three
  * distinct failure states, so a host can tell the user accurately what to do.
  *
@@ -297,6 +336,48 @@ export interface QWERTYToABCOptions {
    * with the octave keys; `setOctave()` changes it programmatically.
    */
   octaveShift?: number;
+
+  // Teaching features
+  /**
+   * Where the computer-keyboard layout starts: `'E3'` (default; H = C4) or
+   * `'C4'` (A = C4, the home row runs C4–F5). The octave shift moves either.
+   * The on-screen QWERTY piano, its octave mini-map and the help table follow
+   * the anchor.
+   */
+  qwertyAnchor?: QwertyAnchor;
+  /**
+   * How keys are labelled; see {@link NoteLabels}. Default `'auto'`. Change it
+   * later with `setNoteLabels()`.
+   */
+  noteLabels?: NoteLabels;
+  /**
+   * Restrict input to these pitches. Keys outside the set are greyed out
+   * (class `qap-key-disabled`) and ignored on every input path: touch, the
+   * computer keyboard and MIDI (no sound, no ABC, no `onNotePlayed`).
+   * Default `null` (every pitch). Change it later with `setAllowedPitches()`.
+   *
+   * @example
+   * allowedPitches: { low: 'C4', high: 'G4' }
+   * allowedPitches: ['C4', 'E4', 'G4']
+   */
+  allowedPitches?: AllowedPitches;
+  /**
+   * Which instance hears the computer keyboard and Web MIDI when several
+   * pianos share a page. `'document'` (default): every instance hears every
+   * key. `'focus'`: only the active instance does, meaning the one with focus
+   * inside its container, or else the one most recently touched or clicked.
+   * Touch input always goes to the piano that was touched.
+   */
+  keyboardScope?: 'document' | 'focus';
+  /**
+   * Fires for every note that sounds, in both modes and from every input
+   * (not for rests, and not in percussion mode). Use it to check an answer
+   * without parsing ABC.
+   *
+   * @example
+   * onNotePlayed: ({ pitch, source }) => console.log(pitch, source) // 'C4' 'qwerty'
+   */
+  onNotePlayed?: ((event: NotePlayedEvent) => void) | null;
 
   // Callbacks
   /** Fires when a single note is recorded; `lastNote` is its ABC token (e.g. `'^F/2'`). */

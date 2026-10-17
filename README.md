@@ -108,8 +108,10 @@ The `fullUI` handle:
 | `letterReadout` | `boolean` | `false` | Show the entered notes as letters **in play order** (repeats included, most recent highlighted) |
 | `compactChrome` | `boolean` | `false` | Tighten the non-keyboard chrome so the keyboard gets the room |
 | `touchRange` | `'auto' \| false \| { low, high }` | `'auto'` | Touch keyboard range: `'auto'` picks the board from the mount width; `{ low, high }` pins it; `false` keeps the QWERTY layout |
+| `keyboard` | `'auto' \| 'range'` | `'auto'` | `'range'` draws the range keyboard on every device, desktop included (with `touchRange` to choose the keys). See [Teaching features](#teaching-features) |
+| `showEditRow` | `boolean` | `true` | Honoured only on a play-only mount (`lockMode: true`, `defaultMode: 'play'`): `false` hides the undo / clear row and the mode button there |
 
-The undo / clear edit row is always rendered. Initial values for the Advanced panel come from the core options (`keySignature`, `clef`, `timeSignature`, `barlineMode`, `measuresPerLine`, `showNoteNames`, `showKeyLabels`).
+The undo / clear edit row is rendered on every mount that can enter notes. Initial values for the Advanced panel come from the core options (`keySignature`, `clef`, `timeSignature`, `barlineMode`, `measuresPerLine`, `showNoteNames`, `showKeyLabels`).
 
 Examples:
 
@@ -229,6 +231,70 @@ const piano = new QWERTYToABCPiano({
 
 ---
 
+### Teaching features
+
+These options and methods turn the piano into a teaching widget: show a
+melody as it plays, limit a lesson to a few notes, label every key, mark an
+answer right or wrong, and put several pianos on one page. Every default
+keeps the behaviour described above.
+
+```js
+const piano = mountFullUI('#lesson', {
+  qwertyAnchor: 'C4',                         // home row A S D F G … = C4 D4 E4 F4 G4 …
+  noteLabels: 'scientific',                   // C4, D4, … and C#4 on every key
+  allowedPitches: { low: 'C4', high: 'G4' },  // grey out and ignore everything else
+  keyboardScope: 'focus',                     // only the piano in focus hears the keyboard
+  onNotePlayed: ({ pitch, source }) => check(pitch), // 'E4', 'qwerty' | 'touch' | 'midi'
+});
+
+piano.highlightPitches(['C4', 'E4', 'G4']);   // playback colour; returns pitches not on the board
+piano.markKeys({ C4: 'correct', D4: 'wrong', E4: 'missed' });
+piano.clearHighlight();
+piano.clearMarks();
+```
+
+- **Highlight** (`highlightPitches(pitches)`, `clearHighlight()`): colours keys
+  in a playback colour, separate from the pressed-key colour. It replaces the
+  previous highlight and returns the pitches the drawn keyboard does not show.
+  Class `qap-key-highlight`, colour `--qwerty-abc-piano-highlight-color`.
+- **Marks** (`markKeys({ pitch: state })`, `clearMarks()`): feedback colours,
+  `'correct'`, `'wrong'` or `'missed'`. They replace the previous marks; a
+  highlight is drawn over a mark. Classes `qap-mark-correct` / `-wrong` /
+  `-missed`, colours `--qwerty-abc-piano-mark-correct` / `-wrong` / `-missed`.
+- Highlights and marks are stored by pitch, so they survive every redraw
+  (range changes, octave steppers, resizing, label changes). On the QWERTY
+  layout a pitch lights whichever key plays it at the current octave shift.
+- **Allowed pitches** (`allowedPitches` option, `setAllowedPitches()`,
+  `getAllowedPitches()`): a list (`['C4', 'E4', 'G4']`) or an inclusive range
+  (`{ low: 'C4', high: 'G4' }`); `null` allows everything. Other keys are
+  greyed out (`qap-key-disabled`, `--qwerty-abc-piano-disabled-fill`) and
+  ignored on every input path: touch, computer keyboard and MIDI make no
+  sound, write no ABC and fire no `onNotePlayed`. On a range keyboard the
+  octave steppers stop at the allowed span.
+- **C4 anchor** (`qwertyAnchor: 'C4'`): the home row starts on middle C. See
+  [Key mapping](#key-mapping). The octave shift, the on-screen keyboard, the
+  octave mini-map and the help table all follow it.
+- **Labels** (`noteLabels`, `setNoteLabels()`): `'auto'` (default),
+  `'letters'`, or `'scientific'` for a pitch name on every white and black key,
+  on both layouts.
+- **Range keyboard on desktop** (`keyboard: 'range'`, `mountFullUI` only): for
+  a display piano that shows exact keys, e.g.
+  `{ keyboard: 'range', touchRange: { low: 'C4', high: 'C5' } }`.
+- **Several pianos on one page** (`keyboardScope: 'focus'`): only the active
+  piano hears the computer keyboard and Web MIDI: the one with focus inside
+  it, or else the one most recently clicked or touched. `mountFullUI` makes
+  the container focusable (`tabindex="0"`) and draws a focus ring
+  (`--qwerty-abc-piano-focus-ring`). Touch always goes to the piano touched.
+- **Note callback** (`onNotePlayed`): fires for every note that sounds, in
+  both modes and from every input, with `{ pitch, midi, source }`. Not for
+  rests or in percussion mode.
+- **Play-only mounts** (`lockMode: true, defaultMode: 'play', showEditRow: false`):
+  nothing can be entered, so the undo / clear row and the mode button go.
+
+Pitch strings everywhere accept sharps and flats (`'F#4'`, `'Bb3'`); results
+use sharps. `keyForPitch(pitch, anchor?, shift?)` and
+`pitchForKey(key, anchor?, shift?)` convert between pitches and QWERTY keys.
+
 ## Key mapping
 
 ### Note keys
@@ -256,6 +322,20 @@ octave (clamped to ±2). Accidentals are handled automatically based on the
 current key signature.
 
 Letter keys are case-insensitive (Caps Lock does not matter), holding a note, rest or chord key does not auto-repeat, and keys typed into an `<input>`, `<textarea>`, `<select>` or contenteditable element are ignored. `Space` / `Enter` on a focused button or link activate it as usual.
+
+**C4-anchored layout** (`qwertyAnchor: 'C4'`): the home row starts on middle C.
+
+```
+Top row:   Q  W  E  R  T  Y  U  I  O  P  [
+           —  C♯ D♯ —  F♯ G♯ A♯ —  C♯ D♯ —
+              4  4     4  4  4     5  5
+
+Home row:  A  S  D  F  G  H  J  K  L  ;  '
+           C  D  E  F  G  A  B  C  D  E  F
+           4  4  4  4  4  4  4  5  5  5  5
+```
+
+`Q` still starts a triplet; `R`, `I` and `[` are gaps.
 
 > **Touch mode:** the fixed QWERTY range and the ±2 octave shift do not apply on touch devices. `mountFullUI` renders a range keyboard instead (one or two octaves from C4, picked from the mount width), where the keys are pitch-labelled rather than QWERTY-labelled and sound exactly the pitch on the label. Use the ◀ 8ve / 8ve ▶ pair, the Low / High steppers, or `setTouchKeyRange()` to change the range.
 
@@ -348,6 +428,11 @@ round-trip through `getABC()` / `setABC()` verbatim.
 | `touchGlide` | `boolean` | `false` | **Reserved, not yet implemented** — accepted but currently has no effect |
 | `showKeyLabels` | `boolean` | `true` | Show QWERTY letter labels on piano keys |
 | `showNoteNames` | `boolean` | `true` | Show note name labels (C, D, E…) below white keys |
+| `qwertyAnchor` | `'E3'\|'C4'` | `'E3'` | Where the computer-keyboard layout starts: `'E3'` (H = C4) or `'C4'` (A = C4). See [Key mapping](#key-mapping) |
+| `noteLabels` | `'auto'\|'letters'\|'scientific'` | `'auto'` | Key labels: `'scientific'` names every key (C4, C#4, …); `'auto'` is letters, plus the octave on each C of a range keyboard |
+| `allowedPitches` | `string[]\|{ low, high }\|null` | `null` | Grey out and ignore every pitch outside the set. See [Teaching features](#teaching-features) |
+| `keyboardScope` | `'document'\|'focus'` | `'document'` | `'focus'`: only the active instance hears the computer keyboard and Web MIDI |
+| `onNotePlayed` | `({ pitch, midi, source }) => void` | — | Fired for every note that sounds, in both modes, from `'qwerty'`, `'touch'` or `'midi'` |
 | `onNoteAdded` | `(abc, lastNote) => void` | — | Fired when a note is added |
 | `onNoteDeleted` | `(abc) => void` | — | Fired when a note is undone |
 | `onChange` | `(abc) => void` | — | Fired on any notation change |
@@ -427,9 +512,22 @@ setTouchKeyRange(low: string | null, high: string | null): void
 // Pass null for both to reset to the default QWERTY layout (E3–A4).
 // No-op in percussion mode or when no piano target is configured.
 
+getTouchKeyRange(): { low: string; high: string } | null  // null on the QWERTY layout
+
 // Display (piano SVG) — remembered across re-renders
 setShowKeyLabels(show: boolean): void
 setShowNoteNames(show: boolean): void
+setNoteLabels(labels: 'auto' | 'letters' | 'scientific'): void
+getNoteLabels(): 'auto' | 'letters' | 'scientific'
+getQwertyAnchor(): 'E3' | 'C4'
+
+// Teaching (see Teaching features)
+highlightPitches(pitches: string[]): string[]  // replaces the highlight; returns pitches not on the board
+clearHighlight(): void
+markKeys(marks: Record<string, 'correct' | 'wrong' | 'missed'>): string[]  // replaces the marks
+clearMarks(): void
+setAllowedPitches(pitches: string[] | { low: string; high: string } | null): void
+getAllowedPitches(): string[] | null
 
 // MIDI
 static isMidiSupported(): boolean              // does this browser have Web MIDI at all?
@@ -447,7 +545,7 @@ destroy(): void    // remove listeners and rendered UI (and, for mountFullUI, em
 
 `MidiEnableResult` is `{ state: 'connected' } | { state: 'unsupported' } | { state: 'notGranted' | 'refused'; errorName?: string; message?: string }`. `notGranted` means the browser never asked (e.g. Firefox before the site permission is granted); `refused` means the user said no.
 
-Exported types: `QWERTYToABCOptions`, `Duration`, `Mode`, `NoteEntry`, `MidiEnableResult`, `MountFullUIOptions`, `MountFullUIHandle`, `MountedFullUI`, `AbcjsInstance`, `AbcjsSynthController`. `VERSION` holds the package version.
+Exported types: `QWERTYToABCOptions`, `Duration`, `Mode`, `NoteEntry`, `MidiEnableResult`, `MountFullUIOptions`, `MountFullUIHandle`, `MountedFullUI`, `AbcjsInstance`, `AbcjsSynthController`, `QwertyAnchor`, `NoteLabels`, `KeyMark`, `AllowedPitches`, `NoteSource`, `NotePlayedEvent`. Exported functions besides the class and `mountFullUI`: `keyForPitch`, `pitchForKey`. `VERSION` holds the package version.
 
 ---
 
@@ -559,8 +657,18 @@ The SVG piano keyboard uses CSS custom properties for key-highlight colors. Set 
   --qwerty-abc-piano-play-color:       #d97c3a; /* orange — active in play mode */
   --qwerty-abc-piano-sim-color:        #4caf50; /* green — simultaneous (chord) mode active */
   --qwerty-abc-piano-sim-color-dark:   #388e3c; /* dark green — black keys in chord mode */
+  --qwerty-abc-piano-highlight-color:  #4a90d9; /* highlightPitches() */
+  --qwerty-abc-piano-mark-correct:     #2a9d4a; /* markKeys() states */
+  --qwerty-abc-piano-mark-wrong:       #d05c54;
+  --qwerty-abc-piano-mark-missed:      #e0a526;
+  --qwerty-abc-piano-disabled-fill:       #e2e2e2; /* white keys outside allowedPitches */
+  --qwerty-abc-piano-disabled-fill-black: #9a9a9a; /* black keys outside allowedPitches */
+  --qwerty-abc-piano-focus-ring:       #1a5fb4; /* mountFullUI with keyboardScope: 'focus' */
 }
 ```
+
+A pressed key always shows its pressed colour; over that, a highlight is
+drawn over a mark.
 
 The notation area rendered by `mountFullUI` (or when `notationTheme: 'black'`) always has a white background so it is legible on any page background colour.
 

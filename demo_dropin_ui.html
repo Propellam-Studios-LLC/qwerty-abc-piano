@@ -86,6 +86,29 @@
       font-family: monospace;
     }
     .info-box strong { color: #ccc; }
+
+    /* ── Teaching features panel ─────────────────────────────── */
+    .teach {
+      margin-top: 18px;
+      background: #1a1c2c;
+      border: 1px solid #333a5a;
+      border-radius: 6px;
+      padding: 12px 16px;
+      font-size: 0.82rem;
+      color: #bbb;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .teach h2 { font-size: 0.95rem; color: #a0c4ff; }
+    .teach .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .teach label { display: inline-flex; align-items: center; gap: 4px; }
+    .teach select, .teach button {
+      font: inherit; padding: 3px 8px; border-radius: 4px;
+      border: 1px solid #444; background: #22223a; color: #ddd; cursor: pointer;
+    }
+    .teach button:hover { border-color: #666; color: #fff; }
+    #played { font-family: monospace; color: #7ec8e3; }
   </style>
 </head>
 <body>
@@ -95,6 +118,33 @@
 
 <!-- mountFullUI renders the entire instrument into this one div -->
 <div id="full-ui"></div>
+
+<!-- Teaching features: each control calls the option or method it names -->
+<div class="teach">
+  <h2>Teaching features</h2>
+  <div class="row">
+    <label>qwertyAnchor
+      <select id="t-anchor"><option>E3</option><option>C4</option></select></label>
+    <label>keyboard
+      <select id="t-keyboard"><option>auto</option><option value="range">range (C4–C5)</option></select></label>
+    <label>noteLabels
+      <select id="t-labels"><option>auto</option><option>letters</option><option>scientific</option></select></label>
+    <label>allowedPitches
+      <select id="t-allowed">
+        <option value="">null (all)</option>
+        <option value="five">{ low: 'C4', high: 'G4' }</option>
+        <option value="triad">['C4', 'E4', 'G4']</option>
+      </select></label>
+  </div>
+  <div class="row">
+    <button id="t-scale" type="button">highlightPitches: play C major scale</button>
+    <button id="t-chord" type="button">highlightPitches(['C4','E4','G4'])</button>
+    <button id="t-clear-hl" type="button">clearHighlight()</button>
+    <button id="t-marks" type="button">markKeys({ C4: correct, D4: wrong, E4: missed })</button>
+    <button id="t-clear-marks" type="button">clearMarks()</button>
+  </div>
+  <div class="row">onNotePlayed: <span id="played">—</span></div>
+</div>
 
 <!-- Raw ABC output + copy button (outside the drop-in UI) -->
 <div class="output-bar">
@@ -143,14 +193,52 @@
   document.addEventListener('keydown',  () => audioCtx?.state === 'suspended' && audioCtx.resume(), { capture: true, passive: true });
   document.addEventListener('pointerdown', () => audioCtx?.state === 'suspended' && audioCtx.resume(), { capture: true, passive: true });
 
-  const inst = mountFullUI('#full-ui', {
-    abcjs:              ABCJS,
-    abcjsAudioContext:  audioCtx,
-    abcjsRenderOptions: { responsive: 'resize', add_classes: true },
-    onChange: (abc) => {
-      document.getElementById('abc-text').textContent = abc || '(empty — start typing notes)';
-    },
+  const $ = (id) => document.getElementById(id);
+  const ALLOWED = { '': null, five: { low: 'C4', high: 'G4' }, triad: ['C4', 'E4', 'G4'] };
+
+  // The anchor and the keyboard type are mount-time options, so changing
+  // them re-mounts; the other controls call setters on the live instance.
+  let inst = null;
+  function mount() {
+    inst?.destroy();
+    const range = $('t-keyboard').value === 'range';
+    inst = mountFullUI('#full-ui', {
+      abcjs:              ABCJS,
+      abcjsAudioContext:  audioCtx,
+      abcjsRenderOptions: { responsive: 'resize', add_classes: true },
+      qwertyAnchor:       $('t-anchor').value,
+      noteLabels:         $('t-labels').value,
+      allowedPitches:     ALLOWED[$('t-allowed').value],
+      ...(range ? { keyboard: 'range', touchRange: { low: 'C4', high: 'C5' } } : {}),
+      onNotePlayed: ({ pitch, midi, source }) => {
+        $('played').textContent = `${pitch} (MIDI ${midi}, ${source})`;
+      },
+      onChange: (abc) => {
+        $('abc-text').textContent = abc || '(empty — start typing notes)';
+      },
+    });
+  }
+  mount();
+
+  $('t-anchor').addEventListener('change', mount);
+  $('t-keyboard').addEventListener('change', mount);
+  $('t-labels').addEventListener('change', (e) => inst.setNoteLabels(e.target.value));
+  $('t-allowed').addEventListener('change', (e) => inst.setAllowedPitches(ALLOWED[e.target.value]));
+
+  let scaleTimer = null;
+  $('t-scale').addEventListener('click', () => {
+    clearInterval(scaleTimer);
+    const scale = ['C4', 'D4', 'E4', 'F4', 'G4', 'A4', 'B4', 'C5'];
+    let i = 0;
+    scaleTimer = setInterval(() => {
+      if (i === scale.length) { clearInterval(scaleTimer); inst.clearHighlight(); return; }
+      inst.highlightPitches([scale[i++]]);
+    }, 400);
   });
+  $('t-chord').addEventListener('click', () => inst.highlightPitches(['C4', 'E4', 'G4']));
+  $('t-clear-hl').addEventListener('click', () => { clearInterval(scaleTimer); inst.clearHighlight(); });
+  $('t-marks').addEventListener('click', () => inst.markKeys({ C4: 'correct', D4: 'wrong', E4: 'missed' }));
+  $('t-clear-marks').addEventListener('click', () => inst.clearMarks());
 
   // Copy ABC button
   const copyBtn = document.getElementById('btn-copy');
